@@ -1,0 +1,85 @@
+import Foundation
+
+/// Capture statistics parsed from the Seestar FITS headers. Surfaced in the UI
+/// (the placard) so users attribute quality limits to capture, not the app
+/// (design §0/§9).
+public struct CaptureStats: Codable, Equatable, Sendable {
+    /// Number of light sub-frames stacked.
+    public var frameCount: Int
+    /// Per-sub exposure in seconds (Seestar lights are 10 s).
+    public var subExposureSeconds: Double
+    /// `FILTER` header value, if present (e.g. "LP", "IRCUT", "Duo-band").
+    public var filter: String?
+    /// Whether the capture is broadband (clear/LP) vs duo-band/narrowband.
+    public var isBroadband: Bool
+    /// Target right ascension / declination in degrees, from the header, if present.
+    public var raDegrees: Double?
+    public var decDegrees: Double?
+    /// Sensor temperature in °C, if present.
+    public var sensorTemperatureC: Double?
+
+    public init(frameCount: Int,
+                subExposureSeconds: Double,
+                filter: String? = nil,
+                isBroadband: Bool = true,
+                raDegrees: Double? = nil,
+                decDegrees: Double? = nil,
+                sensorTemperatureC: Double? = nil) {
+        self.frameCount = frameCount
+        self.subExposureSeconds = subExposureSeconds
+        self.filter = filter
+        self.isBroadband = isBroadband
+        self.raDegrees = raDegrees
+        self.decDegrees = decDegrees
+        self.sensorTemperatureC = sensorTemperatureC
+    }
+
+    /// Total integration time in seconds.
+    public var integrationSeconds: Double {
+        Double(frameCount) * subExposureSeconds
+    }
+
+    /// Human-readable integration time, e.g. "48 min" or "1 h 12 min".
+    public var integrationDescription: String {
+        let minutes = Int((integrationSeconds / 60).rounded())
+        if minutes < 60 { return "\(minutes) min" }
+        let h = minutes / 60, m = minutes % 60
+        return m == 0 ? "\(h) h" : "\(h) h \(m) min"
+    }
+
+    /// The placard meta line, e.g. "48 min integrated · 288 × 10s · broadband".
+    public var placardMeta: String {
+        let sub = subExposureSeconds.rounded() == subExposureSeconds
+            ? String(Int(subExposureSeconds))
+            : String(subExposureSeconds)
+        let band = isBroadband ? "broadband" : "narrowband"
+        return "\(integrationDescription) integrated · \(frameCount) × \(sub)s · \(band)"
+    }
+}
+
+/// An imported target: a `<Name>_subs/` folder plus what we know about it.
+public struct Target: Codable, Equatable, Sendable, Identifiable {
+    public var id: UUID
+    /// Display name, e.g. "Orion Nebula".
+    public var name: String
+    /// Catalogue designation if known, e.g. "M 42".
+    public var catalogue: String?
+    /// The `_subs` folder this target was imported from.
+    public var subsPath: String
+    public var capture: CaptureStats
+    public var profile: Profile
+
+    public init(id: UUID = UUID(),
+                name: String,
+                catalogue: String? = nil,
+                subsPath: String,
+                capture: CaptureStats,
+                profile: Profile) {
+        self.id = id
+        self.name = name
+        self.catalogue = catalogue
+        self.subsPath = subsPath
+        self.capture = capture
+        self.profile = profile
+    }
+}

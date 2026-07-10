@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>Seestar Auto-Processor — UI Mockup</title>
+<style>
+  :root{
+    --void:#06070C;
+    --void-deep:#030409;
+    --ink:#EAF0FF;
+    --muted:#8A93A8;
+    --faint:#5A6276;
+    --glass:rgba(18,22,34,0.58);
+    --glass-2:rgba(24,29,44,0.72);
+    --hair:rgba(255,255,255,0.09);
+    --hair-2:rgba(255,255,255,0.14);
+    --oiii:#4FD6C4;   /* teal — OIII emission */
+    --ha:#E85A8A;     /* magenta — H-alpha */
+    --gold:#F5C97B;   /* starlight */
+    --shadow:0 24px 60px -12px rgba(0,0,0,0.7);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    background:
+      radial-gradient(1200px 800px at 70% -10%, #0b1020 0%, transparent 60%),
+      radial-gradient(900px 700px at -10% 110%, #0a0d18 0%, transparent 55%),
+      var(--void-deep);
+    color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",sans-serif;
+    -webkit-font-smoothing:antialiased;
+    display:flex;align-items:center;justify-content:center;
+    min-height:100dvh;padding:24px;overflow:hidden;
+  }
+  .app{
+    position:relative;width:min(1180px,100%);height:min(760px,92dvh);
+    background:var(--void);
+    border-radius:16px;border:1px solid var(--hair);
+    box-shadow:var(--shadow);
+    overflow:hidden;display:flex;flex-direction:column;
+    animation:rise .8s cubic-bezier(.16,1,.3,1) both;
+  }
+  @keyframes rise{from{opacity:0;transform:translateY(14px) scale(.99)}to{opacity:1;transform:none}}
+
+  /* ---- title bar ---- */
+  .titlebar{
+    position:absolute;inset:0 0 auto 0;height:44px;z-index:40;
+    display:flex;align-items:center;gap:8px;padding:0 16px;
+    background:linear-gradient(to bottom,rgba(6,7,12,.55),transparent);
+    pointer-events:none;
+  }
+  .lights{display:flex;gap:8px}
+  .lights i{width:12px;height:12px;border-radius:50%;display:block}
+  .lights .r{background:#FF5F57}.lights .y{background:#FEBC2E}.lights .g{background:#28C840}
+  .appmark{margin-left:12px;font-size:12.5px;letter-spacing:.02em;color:var(--muted);font-weight:590}
+  .appmark b{color:var(--ink);font-weight:640}
+
+  /* ---- stage ---- */
+  .stage{position:relative;flex:1;overflow:hidden;background:var(--void)}
+  .screen{position:absolute;inset:0}
+  .screen[hidden]{display:none}
+
+  .view{position:absolute;inset:0;overflow:hidden}
+  .view img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;
+    transition:filter .45s cubic-bezier(.16,1,.3,1),opacity .45s,transform .45s}
+  .neb{z-index:1}
+  .star{z-index:2;mix-blend-mode:screen}
+  .floor{position:absolute;inset:0;z-index:3;pointer-events:none;
+    background:radial-gradient(120% 120% at 50% 45%,transparent 42%,rgba(0,0,0,.9) 100%);
+    transition:opacity .45s}
+  .grain{position:absolute;inset:0;z-index:4;pointer-events:none;mix-blend-mode:soft-light;
+    background-size:180px 180px;transition:opacity .45s}
+
+  .before .neb{filter:brightness(.5) saturate(.28) contrast(.92)}
+  .before .star{opacity:.5}
+  .before .floor{opacity:.12}
+  .before .grain{opacity:.55}
+
+  .after{clip-path:inset(0 0 0 var(--split,60%));z-index:5}
+  .after .neb{filter:brightness(var(--glow)) saturate(var(--colour)) contrast(var(--contrast))}
+  .after .star{opacity:var(--starOp);transform:scale(var(--starScale));filter:brightness(calc(var(--glow) * 1.05))}
+  .after .floor{opacity:var(--bg)}
+  .after .grain{opacity:var(--grain)}
+
+  /* ---- divider ---- */
+  .divider{position:absolute;top:0;bottom:0;left:60%;width:2px;z-index:20;
+    background:linear-gradient(var(--oiii),rgba(255,255,255,.5),var(--ha));
+    transform:translateX(-1px);box-shadow:0 0 18px rgba(79,214,196,.35)}
+  .handle{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+    width:34px;height:34px;border-radius:50%;
+    background:var(--glass-2);border:1px solid var(--hair-2);backdrop-filter:blur(12px);
+    display:flex;align-items:center;justify-content:center;cursor:ew-resize;
+    box-shadow:0 6px 20px rgba(0,0,0,.5)}
+  .handle svg{width:16px;height:16px;fill:none;stroke:var(--ink);stroke-width:1.6}
+  .tag{position:absolute;top:16px;z-index:21;font-size:10.5px;letter-spacing:.14em;
+    text-transform:uppercase;color:var(--muted);font-weight:600;
+    padding:5px 9px;border-radius:6px;background:rgba(6,7,12,.5);backdrop-filter:blur(8px)}
+  .tag.left{left:16px}.tag.right{right:16px;color:var(--ink)}
+
+  /* ---- placard ---- */
+  .placard{position:absolute;left:22px;top:60px;z-index:22;pointer-events:none;
+    text-shadow:0 2px 20px rgba(0,0,0,.8)}
+  .placard .cat{font-size:12px;letter-spacing:.34em;color:var(--oiii);font-weight:640;margin-bottom:5px}
+  .placard .name{font-size:30px;font-weight:280;letter-spacing:-.01em;line-height:1}
+  .placard .meta{margin-top:9px;font-size:11.5px;color:var(--muted);letter-spacing:.02em}
+  .placard .meta b{color:var(--faint);font-weight:400}
+
+  /* ---- right rail ---- */
+  .rail{position:absolute;right:16px;top:56px;z-index:24;display:flex;flex-direction:column;gap:8px}
+  .rail button{width:38px;height:38px;border-radius:10px;border:1px solid var(--hair);
+    background:var(--glass);backdrop-filter:blur(14px);color:var(--muted);cursor:pointer;
+    display:flex;align-items:center;justify-content:center;transition:.18s}
+  .rail button:hover{color:var(--ink);border-color:var(--hair-2);background:var(--glass-2)}
+  .rail button.on{color:var(--oiii);border-color:rgba(79,214,196,.45)}
+  .rail svg{width:17px;height:17px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
+
+  /* ---- control dock ---- */
+  .dock{position:absolute;left:50%;bottom:20px;transform:translateX(-50%);z-index:30;
+    width:min(560px,calc(100% - 32px));
+    background:var(--glass);backdrop-filter:blur(26px) saturate(1.4);
+    border:1px solid var(--hair);border-radius:16px;box-shadow:var(--shadow);
+    padding:14px 16px 16px}
+  .presets{display:flex;gap:6px;margin-bottom:14px}
+  .presets button{flex:1;padding:7px 4px;border-radius:9px;border:1px solid var(--hair);
+    background:transparent;color:var(--muted);font-size:12px;font-weight:560;cursor:pointer;
+    letter-spacing:.01em;transition:.18s}
+  .presets button:hover{color:var(--ink);border-color:var(--hair-2)}
+  .presets button.on{color:var(--void);background:var(--ink);border-color:var(--ink);font-weight:680}
+  .presets button.auto.on{background:var(--oiii);border-color:var(--oiii)}
+
+  .sliders{display:flex;flex-direction:column;gap:13px}
+  .row{display:grid;grid-template-columns:74px 1fr 34px;align-items:center;gap:12px}
+  .row label{font-size:12.5px;color:var(--ink);font-weight:520;letter-spacing:.01em}
+  .row .val{font-size:11px;color:var(--faint);text-align:right;font-variant-numeric:tabular-nums}
+  input[type=range]{-webkit-appearance:none;appearance:none;height:3px;border-radius:3px;
+    background:linear-gradient(90deg,var(--oiii) var(--pct,60%),rgba(255,255,255,.13) var(--pct,60%));
+    outline:none;cursor:pointer}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:15px;height:15px;border-radius:50%;
+    background:#fff;box-shadow:0 1px 6px rgba(0,0,0,.5);transition:transform .12s}
+  input[type=range]:active::-webkit-slider-thumb{transform:scale(1.18)}
+  input[type=range]:focus-visible::-webkit-slider-thumb{box-shadow:0 0 0 4px rgba(79,214,196,.4)}
+
+  .advtoggle{margin-top:14px;padding-top:12px;border-top:1px solid var(--hair);
+    display:flex;align-items:center;justify-content:space-between;cursor:pointer;user-select:none}
+  .advtoggle span{font-size:11.5px;color:var(--muted);font-weight:560;letter-spacing:.03em}
+  .advtoggle svg{width:14px;height:14px;stroke:var(--muted);fill:none;stroke-width:1.6;transition:transform .3s}
+  .advanced{display:grid;grid-template-rows:0fr;transition:grid-template-rows .34s cubic-bezier(.16,1,.3,1)}
+  .advanced>div{overflow:hidden}
+  .app.adv .advanced{grid-template-rows:1fr}
+  .app.adv .advtoggle svg{transform:rotate(180deg)}
+  .advanced .sliders{padding-top:14px}
+
+  .statusline{position:absolute;left:22px;bottom:26px;z-index:22;font-size:11px;color:var(--faint);
+    display:flex;align-items:center;gap:7px}
+  .dot{width:6px;height:6px;border-radius:50%;background:var(--gold);box-shadow:0 0 8px var(--gold)}
+
+  /* ---- baking screen ---- */
+  .bake{display:flex;align-items:center;justify-content:center;height:100%;padding:24px}
+  .bakecard{width:min(440px,100%);text-align:center}
+  .bakeframe{position:relative;aspect-ratio:16/10;border-radius:14px;overflow:hidden;
+    border:1px solid var(--hair);box-shadow:var(--shadow);margin-bottom:22px}
+  .bakeframe img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;
+    filter:brightness(var(--bakeb,.5)) saturate(var(--bakes,.4));transition:filter 1.2s linear}
+  .bakeframe .sheen{position:absolute;inset:0;z-index:3;
+    background:linear-gradient(105deg,transparent 30%,rgba(79,214,196,.14) 50%,transparent 70%);
+    background-size:280% 100%;animation:sheen 2.4s linear infinite}
+  @keyframes sheen{from{background-position:120% 0}to{background-position:-120% 0}}
+  .bakestage{font-size:14px;font-weight:560;margin-bottom:4px}
+  .bakesub{font-size:11.5px;color:var(--muted);letter-spacing:.02em}
+  .bakebar{height:3px;border-radius:3px;background:rgba(255,255,255,.1);margin:18px 0 12px;overflow:hidden}
+  .bakebar i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--oiii),var(--ha));
+    animation:fill 7s cubic-bezier(.4,0,.2,1) forwards}
+  @keyframes fill{to{width:100%}}
+  .bakebtn{margin-top:6px;padding:9px 20px;border-radius:10px;border:1px solid rgba(79,214,196,.4);
+    background:rgba(79,214,196,.08);color:var(--oiii);font-size:12.5px;font-weight:620;cursor:pointer;
+    opacity:0;transition:opacity .5s;letter-spacing:.02em}
+  .bakebtn.ready{opacity:1}
+
+  /* ---- menubar screen ---- */
+  .menubar{height:100%;position:relative;
+    background:radial-gradient(900px 500px at 80% -10%,#0c1122,transparent 60%),var(--void)}
+  .mbstrip{position:absolute;top:0;left:0;right:0;height:26px;background:rgba(8,10,16,.85);
+    backdrop-filter:blur(10px);display:flex;align-items:center;justify-content:flex-end;
+    gap:16px;padding:0 16px;border-bottom:1px solid var(--hair)}
+  .mbstrip .ico{width:14px;height:14px;stroke:var(--muted);fill:none;stroke-width:1.5}
+  .mbstrip .live{color:var(--oiii);font-size:11px;font-weight:600;display:flex;align-items:center;gap:6px}
+  .mbstrip .live .p{width:6px;height:6px;border-radius:50%;background:var(--oiii);animation:pulse 1.6s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+  .popover{position:absolute;top:34px;right:16px;width:300px;
+    background:var(--glass-2);backdrop-filter:blur(30px) saturate(1.4);
+    border:1px solid var(--hair-2);border-radius:14px;box-shadow:var(--shadow);overflow:hidden;
+    animation:pop .3s cubic-bezier(.16,1,.3,1) both}
+  @keyframes pop{from{opacity:0;transform:translateY(-8px) scale(.97)}to{opacity:1;transform:none}}
+  .pophead{padding:13px 15px;border-bottom:1px solid var(--hair);display:flex;
+    align-items:center;justify-content:space-between}
+  .pophead .t{font-size:12.5px;font-weight:620}
+  .pophead .s{font-size:10.5px;color:var(--muted);margin-top:2px}
+  .pophead .cog{width:15px;height:15px;stroke:var(--muted);fill:none;stroke-width:1.5}
+  .job{display:flex;align-items:center;gap:12px;padding:11px 15px;transition:.15s;cursor:pointer}
+  .job:hover{background:rgba(255,255,255,.04)}
+  .job+.job{border-top:1px solid rgba(255,255,255,.05)}
+  .thumb{width:44px;height:34px;border-radius:7px;object-fit:cover;flex-shrink:0;border:1px solid var(--hair)}
+  .job .info{flex:1;min-width:0}
+  .job .jn{font-size:12.5px;font-weight:540}
+  .job .js{font-size:10.5px;color:var(--muted);margin-top:2px}
+  .chip{font-size:9.5px;font-weight:640;letter-spacing:.06em;text-transform:uppercase;
+    padding:3px 7px;border-radius:5px}
+  .chip.ready{color:var(--oiii);background:rgba(79,214,196,.12)}
+  .chip.baking{color:var(--gold);background:rgba(245,201,123,.12)}
+  .popfoot{padding:10px 15px;font-size:10.5px;color:var(--faint);border-top:1px solid var(--hair)}
+
+  /* ---- mockup state switcher ---- */
+  .switch{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);z-index:100;
+    display:flex;gap:2px;padding:3px;border-radius:11px;
+    background:rgba(10,12,20,.8);backdrop-filter:blur(16px);border:1px solid var(--hair)}
+  .switch button{padding:7px 14px;border-radius:8px;border:none;background:transparent;
+    color:var(--muted);font-size:11.5px;font-weight:560;cursor:pointer;transition:.16s;
+    font-family:inherit;letter-spacing:.01em}
+  .switch button.on{background:rgba(255,255,255,.1);color:var(--ink)}
+  .switch .lbl{color:var(--faint);font-size:10px;align-self:center;padding:0 8px 0 4px;letter-spacing:.06em;text-transform:uppercase}
+
+  @media (max-width:640px){
+    body{padding:0}
+    .app{height:100dvh;border-radius:0;border:none}
+    .placard .name{font-size:24px}
+    .dock{width:calc(100% - 20px);bottom:74px}
+    .rail{top:52px}
+    .switch{bottom:10px}
+  }
+  @media (prefers-reduced-motion:reduce){
+    *{animation-duration:.001s!important;transition-duration:.001s!important}
+  }
+</style>
+</head>
+<body>
+<div class="app" id="app">
+  <div class="titlebar">
+    <div class="lights"><i class="r"></i><i class="y"></i><i class="g"></i></div>
+    <div class="appmark"><b>Nebula</b> — deep-sky, done for you</div>
+  </div>
+
+  <div class="stage">
+    <!-- ============ EDIT SCREEN ============ -->
+    <div class="screen" id="scr-edit">
+      <div class="view before">
+        <img class="neb" id="nebB" alt="">
+        <img class="star" id="starB" alt="">
+        <div class="floor"></div><div class="grain" id="grainB"></div>
+      </div>
+      <div class="view after" id="after">
+        <img class="neb" id="nebA" alt="">
+        <img class="star" id="starA" alt="">
+        <div class="floor"></div><div class="grain" id="grainA"></div>
+      </div>
+
+      <div class="tag left">As captured</div>
+      <div class="tag right">Refined</div>
+      <div class="divider" id="divider">
+        <div class="handle"><svg viewBox="0 0 24 24"><path d="M9 7l-4 5 4 5M15 7l4 5-4 5"/></svg></div>
+      </div>
+
+      <div class="placard">
+        <div class="cat">M 42</div>
+        <div class="name">Orion Nebula</div>
+        <div class="meta">48 min integrated · 288 × 10s · <b>broadband</b></div>
+      </div>
+
+      <div class="statusline"><span class="dot"></span> Refined · unsaved</div>
+
+      <div class="rail">
+        <button id="baToggle" class="on" title="Before / after"><svg viewBox="0 0 24 24"><path d="M12 3v18M5 8l-3 4 3 4M19 8l3 4-3 4"/></svg></button>
+        <button title="Reset to Auto" id="resetBtn"><svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7M3 4v4h4"/></svg></button>
+        <button title="Export image"><svg viewBox="0 0 24 24"><path d="M12 15V3m0 0L8 7m4-4l4 4M4 15v4a2 2 0 002 2h12a2 2 0 002-2v-4"/></svg></button>
+      </div>
+
+      <div class="dock">
+        <div class="presets" id="presets">
+          <button class="auto on" data-preset="auto">Auto</button>
+          <button data-preset="natural">Natural</button>
+          <button data-preset="vivid">Vivid</button>
+          <button data-preset="deep">Deep</button>
+        </div>
+        <div class="sliders">
+          <div class="row"><label>Glow</label><input type="range" id="glow" min="0" max="100" value="60"><div class="val" id="glow-v">60</div></div>
+          <div class="row"><label>Colour</label><input type="range" id="colour" min="0" max="100" value="55"><div class="val" id="colour-v">55</div></div>
+          <div class="row"><label>Stars</label><input type="range" id="stars" min="0" max="100" value="65"><div class="val" id="stars-v">65</div></div>
+        </div>
+        <div class="advtoggle" id="advtoggle">
+          <span>Advanced</span>
+          <svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
+        </div>
+        <div class="advanced"><div>
+          <div class="sliders">
+            <div class="row"><label>Contrast</label><input type="range" id="contrast" min="0" max="100" value="50"><div class="val" id="contrast-v">50</div></div>
+            <div class="row"><label>Background</label><input type="range" id="background" min="0" max="100" value="55"><div class="val" id="background-v">55</div></div>
+            <div class="row"><label>Detail</label><input type="range" id="detail" min="0" max="100" value="40"><div class="val" id="detail-v">40</div></div>
+            <div class="row"><label>Star Size</label><input type="range" id="starSize" min="0" max="100" value="45"><div class="val" id="starSize-v">45</div></div>
+            <div class="row"><label>Denoise</label><input type="range" id="denoise" min="0" max="100" value="60"><div class="val" id="denoise-v">60</div></div>
+          </div>
+        </div></div>
+      </div>
+    </div>
+
+    <!-- ============ BAKING SCREEN ============ -->
+    <div class="screen" id="scr-bake" hidden>
+      <div class="bake"><div class="bakecard">
+        <div class="bakeframe">
+          <img id="bakeImg" alt=""><div class="sheen"></div>
+        </div>
+        <div class="bakestage" id="bakeStage">Stacking 288 frames</div>
+        <div class="bakesub" id="bakeSub">Rejecting satellites &amp; hot pixels · 48 min of light</div>
+        <div class="bakebar"><i></i></div>
+        <button class="bakebtn" id="bakeBtn">Open Orion Nebula</button>
+      </div></div>
+    </div>
+
+    <!-- ============ MENUBAR SCREEN ============ -->
+    <div class="screen" id="scr-menu" hidden>
+      <div class="menubar">
+        <div class="mbstrip">
+          <span class="live"><span class="p"></span>Watching Seestar</span>
+          <svg class="ico" viewBox="0 0 24 24"><path d="M12 3a4 4 0 014 4c0 3 2 5 2 5H6s2-2 2-5a4 4 0 014-4zM10 19a2 2 0 004 0"/></svg>
+        </div>
+        <div class="popover">
+          <div class="pophead">
+            <div><div class="t">Nebula</div><div class="s">/Seestar/MyWorks · 2 targets</div></div>
+            <svg class="cog" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/></svg>
+          </div>
+          <div class="job">
+            <img class="thumb" id="thmb1" alt="">
+            <div class="info"><div class="jn">Orion Nebula</div><div class="js">Refined · 48 min · just now</div></div>
+            <span class="chip ready">Ready</span>
+          </div>
+          <div class="job">
+            <img class="thumb" id="thmb2" alt="">
+            <div class="info"><div class="jn">Rosette Nebula</div><div class="js">Separating stars · 62%</div></div>
+            <span class="chip baking">Baking</span>
+          </div>
+          <div class="popfoot">New light arrives → baked automatically. No clicks.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="switch">
+  <span class="lbl">Mockup</span>
+  <button class="on" data-scr="edit">Edit</button>
+  <button data-scr="bake">Baking</button>
+  <button data-scr="menu">Menubar</button>
+</div>
+
+<script>
+/* ---------- seeded RNG ---------- */
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+
+/* ---------- render a believable deep-sky nebula to a dataURL ---------- */
+function renderNebula(w,h,seed){
+  const c=document.createElement('canvas');c.width=w;c.height=h;
+  const x=c.getContext('2d');const rnd=mulberry32(seed);
+  x.fillStyle='#06070c';x.fillRect(0,0,w,h);
+
+  const cx=w*0.52, cy=h*0.5;
+  // emission structure (additive)
+  x.globalCompositeOperation='lighter';
+  const blob=(px,py,r,col,a)=>{const g=x.createRadialGradient(px,py,0,px,py,r);
+    g.addColorStop(0,`rgba(${col},${a})`);g.addColorStop(1,`rgba(${col},0)`);
+    x.fillStyle=g;x.beginPath();x.arc(px,py,r,0,7);x.fill();};
+
+  // large-scale wings: H-alpha magenta + OIII teal
+  blob(cx-40,cy-10,w*0.42,'232,90,138',0.16);
+  blob(cx+90,cy+30,w*0.36,'79,214,196',0.11);
+  blob(cx-140,cy+70,w*0.30,'150,70,110',0.12);
+  blob(cx+180,cy-70,w*0.26,'90,150,230',0.08);
+  // bright core (Trapezium) — gold/white
+  blob(cx,cy,w*0.11,'255,240,214',0.5);
+  blob(cx,cy,w*0.05,'255,255,255',0.6);
+  blob(cx,cy,w*0.20,'245,201,123',0.18);
+
+  // mid turbulence
+  for(let i=0;i<90;i++){
+    const ang=rnd()*7, rad=Math.pow(rnd(),.6)*w*0.34;
+    const px=cx+Math.cos(ang)*rad*1.15, py=cy+Math.sin(ang)*rad*0.8;
+    const pal=[[232,90,138],[79,214,196],[150,80,120],[120,140,220],[245,201,123]][(rnd()*5)|0];
+    blob(px,py,20+rnd()*90,pal.join(','),0.03+rnd()*0.05);
+  }
+  // filaments
+  for(let i=0;i<14;i++){
+    const ang=rnd()*7, rad=w*(0.1+rnd()*0.3);
+    const px=cx+Math.cos(ang)*rad, py=cy+Math.sin(ang)*rad;
+    x.save();x.translate(px,py);x.rotate(rnd()*7);x.scale(1,0.28);
+    blob(0,0,40+rnd()*70,'79,214,196',0.05);x.restore();
+  }
+  // dark dust lanes (carve)
+  x.globalCompositeOperation='source-over';
+  for(let i=0;i<26;i++){
+    const ang=rnd()*7, rad=Math.pow(rnd(),.5)*w*0.3;
+    const px=cx+Math.cos(ang)*rad, py=cy+Math.sin(ang)*rad;
+    const g=x.createRadialGradient(px,py,0,px,py,30+rnd()*70);
+    g.addColorStop(0,'rgba(6,6,12,'+(0.25+rnd()*0.3)+')');g.addColorStop(1,'rgba(6,6,12,0)');
+    x.fillStyle=g;x.beginPath();x.arc(px,py,30+rnd()*70,0,7);x.fill();
+  }
+  // vignette
+  const v=x.createRadialGradient(cx,cy,h*0.2,cx,cy,w*0.72);
+  v.addColorStop(0,'rgba(0,0,0,0)');v.addColorStop(1,'rgba(0,0,0,0.72)');
+  x.fillStyle=v;x.fillRect(0,0,w,h);
+  return c.toDataURL();
+}
+
+/* ---------- star field ---------- */
+function renderStars(w,h,seed,n){
+  const c=document.createElement('canvas');c.width=w;c.height=h;
+  const x=c.getContext('2d');const rnd=mulberry32(seed);
+  const tint=()=>{const t=rnd();return t<0.7?'255,255,255':t<0.85?'200,220,255':'255,228,190';};
+  for(let i=0;i<n;i++){
+    const px=rnd()*w, py=rnd()*h, r=Math.pow(rnd(),3)*2.2+0.25, a=0.35+rnd()*0.6, col=tint();
+    const g=x.createRadialGradient(px,py,0,px,py,r*2.4);
+    g.addColorStop(0,`rgba(${col},${a})`);g.addColorStop(1,`rgba(${col},0)`);
+    x.fillStyle=g;x.beginPath();x.arc(px,py,r*2.4,0,7);x.fill();
+    x.fillStyle=`rgba(${col},${Math.min(1,a+0.2)})`;x.beginPath();x.arc(px,py,r*0.5,0,7);x.fill();
+  }
+  // a few bright anchor stars with soft spikes
+  for(let i=0;i<7;i++){
+    const px=rnd()*w, py=rnd()*h, R=3+rnd()*3;
+    const g=x.createRadialGradient(px,py,0,px,py,R*6);
+    g.addColorStop(0,'rgba(255,255,255,.9)');g.addColorStop(.4,'rgba(200,225,255,.3)');g.addColorStop(1,'rgba(200,225,255,0)');
+    x.fillStyle=g;x.beginPath();x.arc(px,py,R*6,0,7);x.fill();
+    x.strokeStyle='rgba(255,255,255,.25)';x.lineWidth=1;
+    x.beginPath();x.moveTo(px-R*5,py);x.lineTo(px+R*5,py);x.moveTo(px,py-R*5);x.lineTo(px,py+R*5);x.stroke();
+  }
+  return c.toDataURL();
+}
+
+/* ---------- grain tile ---------- */
+function grainURL(){
+  const s=140,c=document.createElement('canvas');c.width=c.height=s;
+  const x=c.getContext('2d'),d=x.createImageData(s,s);
+  for(let i=0;i<d.data.length;i+=4){const v=Math.random()*255;d.data[i]=d.data[i+1]=d.data[i+2]=v;d.data[i+3]=255;}
+  x.putImageData(d,0,0);return c.toDataURL();
+}
+
+/* ---------- build assets ---------- */
+const W=1400,H=900;
+const nebURL=renderNebula(W,H,7);
+const starURL=renderStars(W,H,21,520);
+const gURL=grainURL();
+['nebA','nebB','bakeImg'].forEach(id=>document.getElementById(id).src=nebURL);
+['starA','starB'].forEach(id=>document.getElementById(id).src=starURL);
+['thmb1','thmb2'].forEach(id=>document.getElementById(id).src=nebURL);
+[document.getElementById('grainA'),document.getElementById('grainB')].forEach(el=>el.style.backgroundImage=`url(${gURL})`);
+
+/* ---------- slider engine (this is the "responsive" core, in miniature) ---------- */
+const after=document.getElementById('after');
+const ids=['glow','colour','stars','contrast','background','detail','starSize','denoise'];
+const el={};ids.forEach(i=>el[i]=document.getElementById(i));
+
+function paintTrack(input){const p=(input.value-input.min)/(input.max-input.min)*100;input.style.setProperty('--pct',p+'%');}
+
+function apply(){
+  const v=id=>+el[id].value/100;
+  const glow=0.6+v('glow')*1.15;
+  const colour=v('colour')*2.2;
+  const contrast=(0.85+v('contrast')*0.7)*(1+v('detail')*0.22);
+  after.style.setProperty('--glow',glow.toFixed(3));
+  after.style.setProperty('--colour',colour.toFixed(3));
+  after.style.setProperty('--contrast',contrast.toFixed(3));
+  after.style.setProperty('--starOp',v('stars').toFixed(3));
+  after.style.setProperty('--starScale',(0.85+v('starSize')*0.5).toFixed(3));
+  after.style.setProperty('--bg',(v('background')*0.7).toFixed(3));
+  after.style.setProperty('--grain',((1-v('denoise'))*0.45).toFixed(3));
+  ids.forEach(i=>{document.getElementById(i+'-v').textContent=el[i].value;paintTrack(el[i]);});
+}
+ids.forEach(i=>el[i].addEventListener('input',()=>{apply();clearActivePreset();}));
+
+/* ---------- presets ---------- */
+const PRESETS={
+  auto:   {glow:60,colour:55,stars:65,contrast:50,background:55,detail:40,starSize:45,denoise:60},
+  natural:{glow:48,colour:40,stars:62,contrast:44,background:48,detail:32,starSize:42,denoise:66},
+  vivid:  {glow:70,colour:86,stars:72,contrast:64,background:58,detail:52,starSize:50,denoise:56},
+  deep:   {glow:84,colour:62,stars:44,contrast:60,background:74,detail:64,starSize:40,denoise:72}
+};
+function setPreset(name){const p=PRESETS[name];ids.forEach(i=>el[i].value=p[i]);apply();
+  document.querySelectorAll('#presets button').forEach(b=>b.classList.toggle('on',b.dataset.preset===name));}
+function clearActivePreset(){document.querySelectorAll('#presets button').forEach(b=>b.classList.remove('on'));}
+document.querySelectorAll('#presets button').forEach(b=>b.addEventListener('click',()=>setPreset(b.dataset.preset)));
+document.getElementById('resetBtn').addEventListener('click',()=>setPreset('auto'));
+
+/* ---------- advanced disclosure ---------- */
+document.getElementById('advtoggle').addEventListener('click',()=>document.getElementById('app').classList.toggle('adv'));
+
+/* ---------- before/after divider ---------- */
+const divider=document.getElementById('divider');let drag=false;
+function setSplit(clientX){
+  const st=after.parentElement.getBoundingClientRect();
+  let p=(clientX-st.left)/st.width;p=Math.max(0,Math.min(1,p));
+  after.style.setProperty('--split',(p*100)+'%');divider.style.left=(p*100)+'%';
+}
+divider.addEventListener('pointerdown',e=>{drag=true;divider.setPointerCapture(e.pointerId);});
+divider.addEventListener('pointermove',e=>{if(drag)setSplit(e.clientX);});
+divider.addEventListener('pointerup',()=>drag=false);
+const baBtn=document.getElementById('baToggle');
+baBtn.addEventListener('click',()=>{const on=baBtn.classList.toggle('on');
+  after.style.setProperty('--split',on?'60%':'0%');divider.style.display=on?'block':'none';
+  document.querySelectorAll('.tag').forEach(t=>t.style.opacity=on?'1':'0');});
+
+/* ---------- baking screen animation ---------- */
+function runBake(){
+  const stages=[['Registering 288 frames','Aligning stars · correcting field rotation',0.4,0.3],
+    ['Stacking 288 frames','Rejecting satellites & hot pixels · 48 min of light',0.55,0.45],
+    ['Removing sky gradient','Neural background model · no sample points',0.75,0.7],
+    ['Separating stars','Splitting starlight from nebulosity',1,0.95]];
+  let i=0;const img=document.getElementById('bakeImg');
+  const t=setInterval(()=>{if(i>=stages.length){clearInterval(t);
+      document.getElementById('bakeStage').textContent='Ready';
+      document.getElementById('bakeSub').textContent='Orion Nebula · refined automatically';
+      document.getElementById('bakeBtn').classList.add('ready');return;}
+    const[st,sub,b,s]=stages[i];
+    document.getElementById('bakeStage').textContent=st;
+    document.getElementById('bakeSub').textContent=sub;
+    img.style.setProperty('--bakeb',b);img.style.setProperty('--bakes',s);i++;},1750);
+}
+document.getElementById('bakeBtn').addEventListener('click',()=>showScreen('edit'));
+
+/* ---------- screen switcher ---------- */
+function showScreen(name){
+  ['edit','bake','menu'].forEach(s=>document.getElementById('scr-'+s).hidden=(s!==name));
+  document.querySelectorAll('.switch button').forEach(b=>b.classList.toggle('on',b.dataset.scr===name));
+  if(name==='bake'){document.querySelector('.bakebar i').style.animation='none';
+    void document.querySelector('.bakebar i').offsetWidth;
+    document.querySelector('.bakebar i').style.animation='';
+    document.getElementById('bakeBtn').classList.remove('ready');runBake();}
+}
+document.querySelectorAll('.switch button').forEach(b=>b.addEventListener('click',()=>showScreen(b.dataset.scr)));
+
+/* init */
+apply();
+</script>
+</body>
+</html>

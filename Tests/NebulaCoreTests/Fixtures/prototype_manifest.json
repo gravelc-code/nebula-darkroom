@@ -1,0 +1,87 @@
+{
+  "colourMethod": "nativeWhiteBalance",
+  "createdAt": "2026-07-10T10:54:28Z",
+  "layers": [
+    {
+      "format": "fits",
+      "height": 300,
+      "layer": "master",
+      "path": "master.fits",
+      "width": 480
+    },
+    {
+      "format": "fits",
+      "height": 300,
+      "layer": "denoised",
+      "path": "denoised.fits",
+      "width": 480
+    },
+    {
+      "format": "fits",
+      "height": 300,
+      "layer": "starless",
+      "path": "starless.fits",
+      "width": 480
+    },
+    {
+      "format": "fits",
+      "height": 300,
+      "layer": "stars",
+      "path": "stars.fits",
+      "width": 480
+    }
+  ],
+  "look": {
+    "background": 0.55,
+    "colour": 0.55,
+    "contrast": 0.5,
+    "denoise": 0.6,
+    "detail": 0.4,
+    "glow": 0.6,
+    "starSize": 0.45,
+    "stars": 0.65
+  },
+  "schemaVersion": 1,
+  "stageOutcomes": [
+    {
+      "stage": "register+stack",
+      "succeeded": true
+    },
+    {
+      "fallback": "native-white-balance",
+      "stage": "colour",
+      "succeeded": true
+    },
+    {
+      "fallback": "numerical-pedestal-subtraction",
+      "stage": "background-removal",
+      "succeeded": true
+    },
+    {
+      "fallback": "box-blur-fallback",
+      "stage": "denoise",
+      "succeeded": true
+    },
+    {
+      "fallback": "no-separation-starless-equals-master",
+      "stage": "star-separation",
+      "succeeded": true
+    }
+  ],
+  "target": {
+    "capture": {
+      "decDegrees": -5.39,
+      "filter": "LP",
+      "frameCount": 12,
+      "isBroadband": true,
+      "raDegrees": 83.82,
+      "sensorTemperatureC": -10.0,
+      "subExposureSeconds": 10.0
+    },
+    "catalogue": "M 42",
+    "id": "8B3E9316-579C-4A35-B66A-267DECC7CD38",
+    "name": "M42",
+    "profile": "broadbandNebula",
+    "subsPath": "/Users/steve/Library/CloudStorage/Dropbox/new_code/seestar/prototype/synthetic/M42_subs"
+  }
+}

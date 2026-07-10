@@ -1,0 +1,29 @@
+# macOS
+.DS_Store
+
+# Xcode
+build/
+DerivedData/
+*.xcuserstate
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+xcuserdata/
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# Bundled engine artifacts (fetched/built, not committed — see NOTICES)
+Vendor/siril/
+Vendor/models/*.mlpackage
+Vendor/index/
+
+# Phase 0 prototyping scratch
+prototype/out/
+prototype/.venv/
+prototype/synthetic/
+*.fits.tmp
+
+# Large binaries tracked via Git LFS instead (see .gitattributes)

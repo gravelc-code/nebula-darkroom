@@ -1,0 +1,4 @@
+# Phase 0 bake prototype — dev-only, never shipped.
+# The shipping app has NO Python dependency (Swift + Siril binary + CoreML).
+astropy>=5.3
+numpy>=1.24
