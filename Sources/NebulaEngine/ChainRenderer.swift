@@ -19,14 +19,50 @@ public struct EngineParamsGPU {
     var starD: Float
     var shadow0: Float; var shadow1: Float; var shadow2: Float
     var midtone0: Float; var midtone1: Float; var midtone2: Float
+    var starShadow0: Float; var starShadow1: Float; var starShadow2: Float
+    var starMidtone0: Float; var starMidtone1: Float; var starMidtone2: Float
 
-    public init(_ p: EngineParams, auto a: AutoStretch) {
+    public init(_ p: EngineParams, auto a: AutoStretch, star s: StarStretch) {
         denoiseBlend = p.denoiseBlend; blackPoint = p.blackPoint
         glowD = p.glowD; contrastSP = p.contrastSP
         detailStrength = p.detailStrength; saturation = p.saturation
         starWeight = p.starWeight; starD = p.starD
         shadow0 = a.shadow.0; shadow1 = a.shadow.1; shadow2 = a.shadow.2
         midtone0 = a.midtone.0; midtone1 = a.midtone.1; midtone2 = a.midtone.2
+        starShadow0 = s.shadow.0; starShadow1 = s.shadow.1; starShadow2 = s.shadow.2
+        starMidtone0 = s.midtone.0; starMidtone1 = s.midtone.1; starMidtone2 = s.midtone.2
+    }
+}
+
+/// Dedicated stretch for the sparse star layer. The star layer is mostly zero
+/// (background) with compact star flux, so an image-median autostretch would
+/// over-lift noise. Instead: black point at the median (~0), and a midtone that
+/// maps a high percentile (typical faint-star flux) up to a visible level — so
+/// faint field stars survive separation + denoise.
+public struct StarStretch {
+    public var shadow: (Float, Float, Float)
+    public var midtone: (Float, Float, Float)
+
+    public init(base: FITSImage, refPercentile: Float = 0.995, target: Float = 0.55) {
+        func channel(_ c: Int) -> (Float, Float) {
+            var vals: [Float] = []
+            vals.reserveCapacity(base.width * base.height / 16)
+            var i = c
+            let stride = 4 * 4
+            while i < base.rgba.count { vals.append(base.rgba[i]); i += stride }
+            vals.sort()
+            let shadow = max(0, vals[vals.count / 2])                 // background ~0
+            let ref = vals[min(vals.count - 1, Int(Float(vals.count) * refPercentile))]
+            let x0 = (ref - shadow) / max(1 - shadow, 1e-4)
+            let t = target
+            let m = x0 * (1 - t) / max(x0 * (1 - 2 * t) + t, 1e-6)
+            return (shadow, min(max(m, 1e-4), 0.5))
+        }
+        let (s0, m0) = channel(0)
+        let (s1, m1) = channel(1)
+        let (s2, m2) = channel(2)
+        shadow = (s0, s1, s2)
+        midtone = (m0, m1, m2)
     }
 }
 
@@ -102,13 +138,14 @@ public final class ChainRenderer {
         let nebTex, outTex: MTLTexture
         public let width: Int, height: Int
         let auto: AutoStretch
+        let star: StarStretch
         init(master: MTLTexture, denoised: MTLTexture, starless: MTLTexture,
              stars: MTLTexture, nebTex: MTLTexture, outTex: MTLTexture,
-             width: Int, height: Int, auto: AutoStretch) {
+             width: Int, height: Int, auto: AutoStretch, star: StarStretch) {
             self.master = master; self.denoised = denoised
             self.starless = starless; self.stars = stars
             self.nebTex = nebTex; self.outTex = outTex
-            self.width = width; self.height = height; self.auto = auto
+            self.width = width; self.height = height; self.auto = auto; self.star = star
         }
     }
 
@@ -138,13 +175,14 @@ public final class ChainRenderer {
             master: upload(master), denoised: upload(denoised),
             starless: upload(starless), stars: upload(stars),
             nebTex: scratch(w, h), outTex: scratch(w, h),
-            width: w, height: h, auto: AutoStretch(base: starless))
+            width: w, height: h,
+            auto: AutoStretch(base: starless), star: StarStretch(base: stars))
     }
 
     /// Encode the two compute passes into `cmd`, leaving the result in `outTex`.
     private func encodeChain(_ cmd: MTLCommandBuffer, _ params: EngineParams,
                              _ b: LayerBundle) {
-        var u = EngineParamsGPU(params, auto: b.auto)
+        var u = EngineParamsGPU(params, auto: b.auto, star: b.star)
         let tpg = MTLSize(width: 16, height: 16, depth: 1)
         let grid = MTLSize(width: (b.width + 15) / 16, height: (b.height + 15) / 16, depth: 1)
 

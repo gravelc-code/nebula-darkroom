@@ -46,6 +46,10 @@ struct Uniforms {
     // above modulate on top of this sane baseline ("Import -> instant Auto").
     float shadow0; float shadow1; float shadow2;    // per-channel black point
     float midtone0; float midtone1; float midtone2; // per-channel MTF midtone
+    // Dedicated star-layer stretch (much stronger lift than the nebula, tuned to
+    // star flux) so faint field stars survive separation + denoise.
+    float starShadow0; float starShadow1; float starShadow2;
+    float starMidtone0; float starMidtone1; float starMidtone2;
 };
 
 // asinh glow stretch: lifts faint signal, D = strength (0 => identity).
@@ -136,16 +140,18 @@ kernel void finish(texture2d<float, access::read>  nebula [[texture(0)]],
     float3 blur = acc / n;
     neb = clamp(neb + (neb - blur) * u.detailStrength, 0.0, 1.0);
 
-    // Stars: lift the linear star layer with the same auto base stretch so faint
-    // field stars appear, then their own glow stretch (apparent size) and weight,
-    // screened back in so bright cores add without clipping.
-    float3 shadow  = float3(u.shadow0, u.shadow1, u.shadow2);
-    float3 midtone = float3(u.midtone0, u.midtone1, u.midtone2);
+    // Stars: lift the linear star layer with its OWN strong stretch (tuned to
+    // star flux) so faint field stars appear, then their glow stretch (apparent
+    // size) and weight, screened in so bright cores add without clipping.
+    float3 sShadow  = float3(u.starShadow0, u.starShadow1, u.starShadow2);
+    float3 sMidtone = float3(u.starMidtone0, u.starMidtone1, u.starMidtone2);
     float3 st = stars.read(gid).rgb;
-    st = clamp((st - shadow) / max(1.0 - shadow, 1e-4), 0.0, 1.0);
-    st = float3(mtfPivot(st.r, midtone.r),
-                mtfPivot(st.g, midtone.g),
-                mtfPivot(st.b, midtone.b));
+    st = clamp((st - sShadow) / max(1.0 - sShadow, 1e-4), 0.0, 1.0);
+    st = float3(mtfPivot(st.r, sMidtone.r),
+                mtfPivot(st.g, sMidtone.g),
+                mtfPivot(st.b, sMidtone.b));
+    // starD (Star Size) adds glow/bloom to make stars larger; starWeight scales
+    // their presence in the screen.
     float3 stStr = float3(glowStretch(st.r, u.starD),
                           glowStretch(st.g, u.starD),
                           glowStretch(st.b, u.starD)) * clamp(u.starWeight, 0.0, 2.0);

@@ -69,7 +69,7 @@ final class EngineModel: ObservableObject {
 
 struct ContentView: View {
     @EnvironmentObject var model: EngineModel
-    @State private var showAdvanced = false
+    @State private var showAdvanced = true
 
     var body: some View {
         ZStack {
