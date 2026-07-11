@@ -59,6 +59,11 @@ final class EngineModel: ObservableObject {
     @Published var libraryTargets: [CachedTarget] = []
     private var thumbCache: [String: NSImage] = [:]
 
+    // Watch mode: auto-develop new `_sub` folders that land in a watched folder.
+    @Published var watchRoot: URL?
+    @Published var autoBaking: Set<String> = []      // target names currently baking
+    private var watcher: FolderWatcher?
+
     private let baker = BakeRunner()
     var params: EngineParams { look.engineParams }
 
@@ -77,6 +82,10 @@ final class EngineModel: ObservableObject {
             open(URL(fileURLWithPath: args[1]))
         } else if let e = ProcessInfo.processInfo.environment["NEBULA_LAYERS"] {
             open(URL(fileURLWithPath: e))
+        }
+        // Watch a folder from launch (also used to smoke-test watch mode).
+        if let w = ProcessInfo.processInfo.environment["NEBULA_WATCH"] {
+            startWatching(URL(fileURLWithPath: w))
         }
     }
 
@@ -153,6 +162,39 @@ final class EngineModel: ObservableObject {
     // MARK: - Library
 
     func refreshLibrary() { libraryTargets = Library.cachedTargets() }
+
+    // MARK: - Watch mode
+
+    /// Start watching `url` for new `_sub` folders; each is auto-developed in the
+    /// background and appears in the Library. Also develops any already present.
+    func startWatching(_ url: URL) {
+        watchRoot = url
+        let w = FolderWatcher(root: url) { [weak self] subs in self?.autoBake(subsDir: subs) }
+        watcher = w
+        w.start()
+        // Kick off anything already sitting in the folder that isn't baked yet.
+        for subs in FolderWatcher.subTargets(in: url) { autoBake(subsDir: subs) }
+    }
+
+    func stopWatching() { watcher?.stop(); watcher = nil; watchRoot = nil }
+
+    /// Develop a subs folder into the cache in the background — no phase change,
+    /// so it doesn't disturb whatever the user is looking at. Refreshes the
+    /// Library when done.
+    private func autoBake(subsDir: URL) {
+        let name = Self.targetName(from: subsDir)
+        let out = BakeRunner.cacheDir(forTarget: name)
+        if BakeRunner.hasAllLayers(in: out) { return }        // already developed
+        if autoBaking.contains(name) { return }               // already in flight
+        autoBaking.insert(name)
+        Task { [weak self] in
+            let runner = BakeRunner()
+            _ = await runner.bake(subsDir: subsDir, target: name, onProgress: { _ in })
+            guard let self else { return }
+            self.autoBaking.remove(name)
+            self.refreshLibrary()
+        }
+    }
 
     /// Open a previously-developed target straight into the editor (already baked).
     func openCached(_ t: CachedTarget) {
@@ -315,10 +357,18 @@ struct LaunchView: View {
     // Populated Library — a grid of finished-look thumbnails.
     private var library: some View {
         VStack(spacing: 0) {
-            HStack {
+            HStack(spacing: 12) {
                 Text("Nebula").font(.system(size: 26, weight: .semibold))
                     .foregroundStyle(.white)
+                if !model.autoBaking.isEmpty {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text("Developing \(model.autoBaking.count)…")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
                 Spacer()
+                watchButton
                 Button { chooseFolder() } label: {
                     Label("Develop", systemImage: "plus")
                 }
@@ -357,6 +407,31 @@ struct LaunchView: View {
         panel.canChooseFiles = false
         panel.prompt = "Develop"
         if panel.runModal() == .OK, let url = panel.url { model.open(url) }
+    }
+
+    // Watch-mode toggle: pick a parent folder once, new "…_sub" folders auto-develop.
+    @ViewBuilder private var watchButton: some View {
+        if let root = model.watchRoot {
+            Button {
+                model.stopWatching()
+            } label: {
+                Label("Watching \(root.lastPathComponent)", systemImage: "eye.fill")
+            }
+            .buttonStyle(.borderless).foregroundStyle(.white)
+            .help("Click to stop watching")
+        } else {
+            Button { chooseWatchFolder() } label: { Label("Watch Folder…", systemImage: "eye") }
+                .buttonStyle(.borderless).foregroundStyle(.secondary)
+        }
+    }
+
+    private func chooseWatchFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.prompt = "Watch"
+        panel.message = "New “…_subs” folders that land here will develop automatically."
+        if panel.runModal() == .OK, let url = panel.url { model.startWatching(url) }
     }
 }
 
