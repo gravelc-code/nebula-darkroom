@@ -11,6 +11,29 @@ func fail(_ msg: String) -> Never {
     FileHandle.standardError.write(Data((msg + "\n").utf8)); exit(1)
 }
 
+if args.count >= 2, args[1] == "denoise" {
+    // nebula-ai-probe denoise <model> <in.raw> <H> <W> <C> <strength> <out.raw>
+    // in/out are row-major HxWxC float32 (little-endian).
+    guard args.count == 9 else {
+        fail("usage: nebula-ai-probe denoise <model> <in.raw> <H> <W> <C> <strength> <out.raw>")
+    }
+    let model = args[2], inRaw = args[3]
+    guard let H = Int(args[4]), let W = Int(args[5]), let C = Int(args[6]),
+          let strength = Float(args[7]) else { fail("bad numeric args") }
+    let outRaw = args[8]
+    do {
+        let data = try Data(contentsOf: URL(fileURLWithPath: inRaw))
+        let pixels = data.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+        precondition(pixels.count == H * W * C, "\(pixels.count) floats, expected \(H*W*C)")
+        let dn = try Denoiser(modelPath: model)
+        let out = try dn.denoise(pixels: pixels, h: H, w: W, c: C, strength: strength)
+        let outData = out.withUnsafeBufferPointer { Data(buffer: $0) }
+        try outData.write(to: URL(fileURLWithPath: outRaw))
+        print("denoised \(H)x\(W)x\(C) strength=\(strength) -> \(outRaw)")
+    } catch { fail("denoise failed: \(error)") }
+    exit(0)
+}
+
 if args.count >= 2, args[1] == "run" {
     guard args.count == 7 else {
         fail("usage: nebula-ai-probe run <model> <inName> <outName> <in.raw> <out.raw>")
