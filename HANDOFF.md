@@ -10,12 +10,22 @@ plan lives outside the repo at `~/.claude/plans/have-a-look-at-floating-narwhal.
 | Phase | Status |
 |-------|--------|
 | **−1 · Scaffolding** | ✅ Done & tested |
-| **0 · Prove the bake** | ✅ Skeleton done & proven end-to-end through real Siril. ⏳ Acceptance test (beat the JPEG) blocked on real subs + AI binaries. |
-| **1 · Metal engine** | ⬜ Not started (next) |
-| **2 · Native AI (CoreML)** | ⬜ Blocked on model weights |
+| **0 · Prove the bake** | ✅ **Acceptance met.** Proven end-to-end on real subs (M83, 67×30s) with real GraXpert (bg+denoise) + StarNet (separation); decisively beat the Seestar JPEG. Recipe below. |
+| **1 · Metal engine** | 🟡 **Kernel done.** Headless `NebulaRender` runs the Stage-B shader chain on real layers, driven by `EngineParams`; presets render distinct/correct. ⬜ Remaining: live `MTKView`/`CVDisplayLink` loop + SwiftUI slider panel (Xcode app target), tiled export, exact GHS. |
+| **2 · Native AI (CoreML)** | ⬜ Blocked on model weights (ONNX from GraXpert 1.0.1 / StarNet2 in hand as reference) |
 | **3 · Robust bake orchestrator** | ⬜ Not started |
 | **4 · SwiftUI app** | ⬜ Not started |
 | **5 · Watch mode + DMG** | ⬜ Blocked on Apple Developer ID |
+
+### Phase 0 real-AI recipe (dev-only tools, reproduced 2026-07-11)
+- **Siril**: `convert -debayer` (mandatory for Seestar CFA) → register → stack → native colour.
+- **GraXpert 3.0.2 arm64** DMG, headless: `-cli -cmd background-extraction` and `-cmd denoising`
+  (`-output <base>` appends `.fits`, so wrap to normalise the extension).
+- **StarNet++ v2** (`starnet2`+libtorch, bundled in NEPaladin/StarNetPro.app): TIFF-only,
+  needs a *stretched* image → wrap linear FITS ↔ invertible-MTF 16-bit TIFF; `imagecodecs`
+  to read its LZW output. Binary is hardened-runtime signed w/ rpath `/usr/local/lib`; to run
+  a copy, retarget rpath to `@loader_path/lib` + ad-hoc re-sign.
+- **Finish**: Siril `autostretch` on the GraXpert master — **not** a hand-rolled numpy stretch.
 
 ## What exists
 
@@ -69,17 +79,26 @@ prototype/.venv/bin/python prototype/bake.py prototype/synthetic/M42_subs --out 
 2. **`-out=` rejects quotes** (`convert`/`stack`), unlike `cd`/`load`/`save`.
 3. **`convert -out=<dir>` needs the dir to pre-exist.**
 4. **Wipe the work dir** when input subs change — stale `cache/*.lst` star lists persist.
+5. **`convert -debayer`** is mandatory for Seestar CFA subs (OSC), else mono.
+
+## Running the Metal engine (Phase 1)
+```bash
+swift build --product nebula-render --scratch-path /tmp/nebula-build
+/tmp/nebula-build/debug/nebula-render <bake_out_dir> vivid out.png
+# <bake_out_dir> = a bake dir with master/denoised/starless/stars .fits
+```
+Engine = `Sources/NebulaRender/`. Same shaders will drive the live view + export.
 
 ## Immediate next steps
-1. **Phase 1 · Metal engine** — create the Xcode app target; implement the shader
-   chain from design §5 (GHS in-shader) driven by `EngineParams`; `CVDisplayLink`
-   render loop; tiled export == preview; debug slider panel. Can start against
-   synthetic layers from the prototype (`prototype/out/M42/*.fits`).
-2. **Close Phase 0 acceptance** — get a real `<Target>_subs/` folder + GraXpert/
-   StarNet binaries; run `bake.py` with `--graxpert`/`--starnet`; hand-stretch and
-   confirm it beats the Seestar JPEG.
+1. **Finish Phase 1** — create the Xcode app target; wrap the proven `NebulaRender`
+   engine in an `MTKView`/`CVDisplayLink` loop at 120 Hz with a SwiftUI debug
+   slider panel; add tiled full-res export; swap the asinh+MTF stretch for the
+   exact published GHS closed form.
+2. **Phase 2 · CoreML** — convert the in-hand GraXpert 1.0.1 / StarNet2 weights to
+   CoreML to drop the subprocess tools.
 
 ## Blocked-on-assets checklist
-- [ ] Real Seestar `<Target>_subs/` FITS lights (Phase 0 acceptance, Phase 1 real layers)
-- [ ] GraXpert + StarNet ONNX weights / binaries (Phase 0 real AI, Phase 2 CoreML)
+- [x] Real Seestar `<Target>_subs/` FITS lights — using `/Volumes/Seestar/MyWorks/*_sub`
+- [x] GraXpert + StarNet binaries (Phase 0 real AI) — GraXpert 3.0.2 DMG + StarNetPro's starnet2
+- [ ] GraXpert/StarNet **ONNX weights** for in-process CoreML (Phase 2)
 - [ ] Apple Developer ID for notarisation (Phase 5)
