@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -113,8 +114,10 @@ def build_script(subs_dir: str, work_dir: str, precise_colour: bool,
         # `debayer.use_bayer_header=true` (Siril default) picks the pattern per-frame
         # from the header, so this is correct regardless of the specific CFA layout.
         # NB: Siril 1.4's parser does NOT accept quotes on `-out=` (it takes the
-        # quote literally). The work dir is app-controlled and space-free, so an
-        # unquoted path is safe here.
+        # quote literally) AND splits the value on spaces — so `-out=` cannot
+        # express a path containing a space. `run_stack` therefore points these
+        # at a guaranteed space-free scratch dir (real targets like "M 83" put a
+        # space in the app's cache path). See the scratch handling below.
         f"convert light -debayer -out={process_dir}",
         f"cd {_quote(process_dir)}",
         # Global star registration — tolerant of the Seestar's alt-az field rotation.
@@ -130,6 +133,27 @@ def build_script(subs_dir: str, work_dir: str, precise_colour: bool,
         f"save {_quote(master_out)}",
     ]
     return "\n".join(lines) + "\n", master_out
+
+
+def _stage_fits_lights(subs_dir: str, work_dir: str) -> str:
+    """Symlink just the FITS light frames from `subs_dir` into a clean, space-free
+    dir under `work_dir` (sequential names), and return that dir. Falls back to
+    `subs_dir` if it holds no FITS (nothing to filter out)."""
+    fits = sorted(
+        n for n in os.listdir(subs_dir)
+        if n.lower().endswith((".fit", ".fits"))
+    )
+    if not fits:
+        return subs_dir
+    lights_dir = os.path.join(work_dir, "lights")
+    os.makedirs(lights_dir, exist_ok=True)
+    for i, name in enumerate(fits):
+        ext = os.path.splitext(name)[1].lower()
+        link = os.path.join(lights_dir, f"light_{i:05d}{ext}")
+        if os.path.lexists(link):
+            os.remove(link)
+        os.symlink(os.path.join(subs_dir, name), link)
+    return lights_dir
 
 
 def run_stack(
@@ -151,12 +175,31 @@ def run_stack(
         )
 
     os.makedirs(work_dir, exist_ok=True)
+
+    # Siril's `-out=` can express neither quotes nor spaces, but the app's cache
+    # path routinely contains a space (target names like "M 83", "NGC 3372").
+    # Run Siril's `-out=` writes in a guaranteed space-free scratch dir, then
+    # relocate the master into work_dir (Python file ops handle spaces fine, and
+    # so do the downstream AI binaries invoked with argv arrays).
+    siril_work = work_dir if " " not in work_dir else tempfile.mkdtemp(prefix="nebula-siril-")
     # Siril's `convert -out=<dir>` requires the target directory to already exist.
-    os.makedirs(os.path.join(work_dir, "process"), exist_ok=True)
+    os.makedirs(os.path.join(siril_work, "process"), exist_ok=True)
+
+    # A Seestar `<Target>_sub` folder interleaves the real FITS lights with the
+    # on-board preview JPEGs and tiny `_thn.jpg` thumbnails. `convert light` would
+    # ingest ALL of them, so the sequence mixes 1080x1920 lights with 148x264
+    # thumbnails and registration/stacking silently produces no master. Stage
+    # symlinks to just the FITS lights (renamed to clean, space-free sequential
+    # names) in a scratch dir and convert that instead of the raw folder.
+    lights_dir = _stage_fits_lights(subs_dir, siril_work)
+
     outcomes: list[StageOutcome] = []
 
     def _attempt(precise: bool) -> Optional[str]:
-        ssf_text, master_out = build_script(subs_dir, work_dir, precise, mem_gb)
+        ssf_text, master_out = build_script(lights_dir, siril_work, precise, mem_gb)
+        # The .ssf itself is passed to Siril as an argv element, so it may live in
+        # the (possibly spaced) work_dir — only the in-script `-out=` values must
+        # be space-free.
         ssf_path = os.path.join(work_dir, "bake_precise.ssf" if precise else "bake_native.ssf")
         with open(ssf_path, "w") as fh:
             fh.write(ssf_text)
@@ -170,8 +213,15 @@ def run_stack(
             )
         except subprocess.TimeoutExpired:
             return None
-        master_fits = master_out + ".fits"
-        return master_fits if os.path.exists(master_fits) else None
+        produced = master_out + ".fits"
+        if not os.path.exists(produced):
+            return None
+        # Hand the master back inside work_dir so downstream stages and the
+        # manifest reference a stable path (no-op when siril_work == work_dir).
+        final_master = os.path.join(work_dir, "master.fits")
+        if os.path.abspath(produced) != os.path.abspath(final_master):
+            shutil.copyfile(produced, final_master)
+        return final_master
 
     # Register + stack always run; colour method is what varies / falls back.
     master = _attempt(precise=precise_colour)

@@ -76,10 +76,22 @@ prototype/.venv/bin/python prototype/bake.py prototype/synthetic/M42_subs --out 
 ## Hard-won Siril 1.4 gotchas (must reproduce in the Phase 3 Swift port)
 1. **Set a fixed memory ceiling** — `set core.mem_mode=1` + `set core.mem_amount=<GB>`.
    Otherwise `host_statistics64()` can fail → 0 MB → stacking aborts *silently*.
-2. **`-out=` rejects quotes** (`convert`/`stack`), unlike `cd`/`load`/`save`.
+2. **`-out=` can't express a space *or* a quote** (`convert`/`stack`). It takes a
+   quote literally AND splits the value on spaces — so a path like
+   `…/Nebula/M 83/_work/process` silently truncates at the space and `convert`
+   writes nowhere → no master. Real target names ("M 83", "NGC 3372") always hit
+   this. Fix: run Siril's `-out=` writes in a **space-free scratch dir**, then
+   relocate the master into the (possibly spaced) work dir (`siril.py::run_stack`).
 3. **`convert -out=<dir>` needs the dir to pre-exist.**
 4. **Wipe the work dir** when input subs change — stale `cache/*.lst` star lists persist.
 5. **`convert -debayer`** is mandatory for Seestar CFA subs (OSC), else mono.
+6. **A Seestar `<Target>_sub` folder is not all lights.** It interleaves the FITS
+   lights with on-board preview JPEGs *and* 148×264 `_thn.jpg` thumbnails.
+   `convert light` ingests every supported file, so the sequence mixes full
+   frames with thumbnails and registration/stacking silently yields no master.
+   Fix: stage symlinks to **only `*.fit`/`*.fits`** into a clean dir and convert
+   that (`siril.py::_stage_fits_lights`). (Synthetic subs never hit this — they're
+   FITS-only — which is why it only surfaced on the first real bake.)
 
 ## Running the Metal engine (Phase 1)
 ```bash
