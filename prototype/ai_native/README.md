@@ -5,16 +5,24 @@ external `GraXpert.app` subprocess dependency — the real "simple to install" w
 
 ## Status
 
-- ✅ **Denoise pipeline reverse-engineered and reproduced bit-exactly.**
-  `denoise_onnx.py` is a faithful port of GraXpert 3.0.2 `graxpert/denoising.py`
-  (median/MAD normalize → 256px tiles @ stride 128 → keep-bright mask → stitch →
-  strength blend). Driving the shipped ONNX model (`denoise-ai-models/3.0.2`) via
-  onnxruntime matches GraXpert's own CLI output to **max abs diff 1.9e-9** (signal
-  std ~2e-3) on a real M83 crop. So we understand the model I/O and the full
-  wrapping pipeline.
-- ⬜ Background-extraction port (`graxpert/background_extraction.py`) — more
-  involved (AI interpolation + subtraction correction); next.
-- ⬜ Swift integration.
+- ✅ **Denoise reproduced bit-exactly.** `denoise_onnx.py` is a faithful port of
+  GraXpert 3.0.2 `graxpert/denoising.py` (median/MAD normalize → 256px tiles @
+  stride 128 → keep-bright mask → stitch → strength blend). Driving the shipped
+  ONNX model (`denoise-ai-models/3.0.2`) via onnxruntime matches GraXpert's own
+  CLI output to **max abs diff 1.9e-9** (signal std ~2e-3) on a real M83 crop.
+- ✅ **Background-extraction reproduced.** `bg_extract_onnx.py` ports the AI +
+  Subtraction path of `graxpert/background_extraction.py` (downscale→240, pad→256,
+  normalize, single model pass on `bge-ai-models/1.0.1`, blur, upscale, subtract).
+  Matches GraXpert to **max abs diff 2.9e-6** (mean 2.9e-7, signal std 5e-3) on the
+  full M83 master — the residual is just GraXpert's CoreML-EP vs our CPU-EP;
+  visually identical. Needs `opencv-python` for pixel-exact resize/blur.
+- ⬜ **Swift integration** — get onnxruntime into the SwiftPM app (C/Obj-C API or
+  `onnxruntime-objc`), port these two pipelines to Swift, run in-process, and
+  retire the GraXpert subprocess from `BakeRunner` / the aitools wrappers.
+
+## Dev-only tooling (installed in prototype/.venv)
+`onnx`, `onnxruntime`, `coremltools`, `opencv-python-headless<4.11` (numpy-1.x
+compatible — cv2 5.x forces numpy 2 and breaks astropy). Keep `numpy<2`.
 
 ## Format decision: onnxruntime, not a converted CoreML .mlpackage
 
