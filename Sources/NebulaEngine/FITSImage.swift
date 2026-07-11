@@ -17,6 +17,54 @@ public struct FITSImage: Sendable {
         self.width = width; self.height = height; self.channels = channels; self.rgba = rgba
     }
 
+    /// Row-major HxWxC (C = `channels`) — the layout the AI pipelines work in.
+    public func hwcPixels() -> [Float] {
+        let n = width * height
+        var out = [Float](repeating: 0, count: n * channels)
+        for p in 0..<n { for ch in 0..<channels { out[p * channels + ch] = rgba[p * 4 + ch] } }
+        return out
+    }
+
+    /// Build from row-major HxWxC (mono broadcast to R=G=B, alpha = 1).
+    public static func fromHWC(_ hwc: [Float], width: Int, height: Int, channels: Int) -> FITSImage {
+        let n = width * height
+        var rgba = [Float](repeating: 1, count: n * 4)
+        for p in 0..<n {
+            if channels == 1 {
+                let v = hwc[p]; rgba[p*4] = v; rgba[p*4+1] = v; rgba[p*4+2] = v
+            } else {
+                for ch in 0..<min(channels, 3) { rgba[p*4+ch] = hwc[p*channels+ch] }
+            }
+        }
+        return FITSImage(width: width, height: height, channels: channels, rgba: rgba)
+    }
+
+    /// Read just the header cards (KEYWORD -> value string) — for capture metadata
+    /// without decoding pixels.
+    public static func readHeaderCards(_ url: URL) throws -> [String: String] {
+        let data = try Data(contentsOf: url)
+        var cards: [String: String] = [:]
+        var offset = 0
+        while offset + 2880 <= data.count {
+            var sawEnd = false
+            for i in stride(from: offset, to: offset + 2880, by: 80) {
+                let card = String(decoding: data[i..<i+80], as: UTF8.self)
+                let key = card.prefix(8).trimmingCharacters(in: .whitespaces)
+                if key == "END" { sawEnd = true; break }
+                if let eq = card.firstIndex(of: "="), key != "COMMENT", key != "HISTORY" {
+                    let rawVal = card[card.index(after: eq)...]
+                    let val = rawVal.split(separator: "/").first.map {
+                        $0.trimmingCharacters(in: CharacterSet(charactersIn: " '"))
+                    } ?? ""
+                    cards[key] = val
+                }
+            }
+            offset += 2880
+            if sawEnd { break }
+        }
+        return cards
+    }
+
     public enum FITSError: Error { case badHeader(String), truncated }
 
     public static func read(_ url: URL) throws -> FITSImage {

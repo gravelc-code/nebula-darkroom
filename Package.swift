@@ -22,7 +22,10 @@ let package = Package(
         // replacing the GraXpert subprocess. Probe proves ORT links from Swift;
         // nebula-ai is the FITS-in/FITS-out tool the bake wrappers call.
         .executable(name: "nebula-ai-probe", targets: ["NebulaAIProbe"]),
-        .executable(name: "nebula-ai", targets: ["NebulaAICLI"])
+        .executable(name: "nebula-ai", targets: ["NebulaAICLI"]),
+        // Phase 3: the native Swift bake orchestrator (Siril subprocess + AI
+        // in-process + typed manifest), replacing the Python bake seam.
+        .executable(name: "nebula-bake-native", targets: ["NebulaBakeCLI"])
     ],
     dependencies: [
         // onnxruntime C/Obj-C runtime as a binary xcframework. Pinned to 1.19.2
@@ -54,13 +57,21 @@ let package = Package(
             name: "NebulaAICLI",
             dependencies: ["NebulaAI", "NebulaEngine"]
         ),
+        .target(
+            name: "NebulaBake",
+            dependencies: ["NebulaCore", "NebulaEngine", "NebulaAI"]
+        ),
+        .executableTarget(
+            name: "NebulaBakeCLI",
+            dependencies: ["NebulaBake", "NebulaCore"]
+        ),
         .executableTarget(
             name: "NebulaRender",
             dependencies: ["NebulaCore", "NebulaEngine"]
         ),
         .executableTarget(
             name: "NebulaApp",
-            dependencies: ["NebulaCore", "NebulaEngine"]
+            dependencies: ["NebulaCore", "NebulaEngine", "NebulaBake"]
         ),
         .testTarget(
             name: "NebulaCoreTests",
