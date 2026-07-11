@@ -258,6 +258,52 @@ public final class ChainRenderer {
         cmd.commit()
     }
 
+    /// Render the finished look at reduced size for a library thumbnail. Reuses
+    /// the exact chain (so the card matches the editor), then downsamples on the
+    /// CPU to an 8-bit sRGB `CGImage` — plenty for a grid cell.
+    public func renderThumbnail(bundle: LayerBundle, params: EngineParams,
+                                maxDimension: Int) throws -> CGImage {
+        let cmd = queue.makeCommandBuffer()!
+        encodeChain(cmd, params, bundle)
+        cmd.commit(); cmd.waitUntilCompleted()
+        if let err = cmd.error { throw Err.msg("GPU: \(err)") }
+        return try downscaled(bundle.outTex, maxDimension: maxDimension)
+    }
+
+    /// Read an RGBA32F texture back and produce a downscaled 8-bit sRGB CGImage.
+    private func downscaled(_ tex: MTLTexture, maxDimension: Int) throws -> CGImage {
+        let (w, h) = (tex.width, tex.height)
+        var floats = [Float](repeating: 0, count: w * h * 4)
+        floats.withUnsafeMutableBytes { raw in
+            tex.getBytes(raw.baseAddress!, bytesPerRow: w * 16,
+                         from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
+        }
+        var px = [UInt8](repeating: 255, count: w * h * 4)
+        for i in 0..<(w * h) {
+            for c in 0..<3 {
+                px[i*4+c] = UInt8((max(0, min(1, floats[i*4+c])) * 255).rounded())
+            }
+        }
+        let cs = CGColorSpace(name: CGColorSpace.sRGB)!
+        let info = CGImageAlphaInfo.premultipliedLast.rawValue
+        guard let full = px.withUnsafeMutableBytes({ raw -> CGImage? in
+            CGContext(data: raw.baseAddress, width: w, height: h, bitsPerComponent: 8,
+                      bytesPerRow: w * 4, space: cs, bitmapInfo: info)?.makeImage()
+        }) else { throw Err.msg("thumb CGContext failed") }
+
+        let scale = min(1, Double(maxDimension) / Double(max(w, h)))
+        let tw = max(1, Int((Double(w) * scale).rounded()))
+        let th = max(1, Int((Double(h) * scale).rounded()))
+        guard let ctx = CGContext(data: nil, width: tw, height: th, bitsPerComponent: 8,
+                                  bytesPerRow: 0, space: cs, bitmapInfo: info) else {
+            throw Err.msg("thumb scale ctx failed")
+        }
+        ctx.interpolationQuality = .high
+        ctx.draw(full, in: CGRect(x: 0, y: 0, width: tw, height: th))
+        guard let out = ctx.makeImage() else { throw Err.msg("thumb scale failed") }
+        return out
+    }
+
     /// Headless export: run the chain and write a PNG (the CLI path).
     public func renderPNG(bundle: LayerBundle, params: EngineParams, to url: URL) throws {
         let cmd = queue.makeCommandBuffer()!

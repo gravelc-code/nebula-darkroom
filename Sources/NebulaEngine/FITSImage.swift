@@ -5,7 +5,7 @@ import Foundation
 /// `BITPIX=-32`, big-endian, 2-D (H,W) mono or 3-D (3,H,W) plane-separated RGB —
 /// rather than the whole FITS standard. This honours the manifest's FITS
 /// interchange contract without pulling in a dependency.
-public struct FITSImage {
+public struct FITSImage: Sendable {
     public let width: Int
     public let height: Int
     public let channels: Int          // 1 or 3

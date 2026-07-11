@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import ImageIO
 import UniformTypeIdentifiers
 import MetalKit
 import NebulaCore
@@ -54,6 +55,10 @@ final class EngineModel: ObservableObject {
     @Published var compare = false
     @Published var divider: Float = 0.5
 
+    // The Library grid: previously-developed targets and their (lazy) thumbnails.
+    @Published var libraryTargets: [CachedTarget] = []
+    private var thumbCache: [String: NSImage] = [:]
+
     private let baker = BakeRunner()
     var params: EngineParams { look.engineParams }
 
@@ -62,6 +67,8 @@ final class EngineModel: ObservableObject {
         // the shaders fail, that's a hard failure — surface it immediately.
         do { renderer = try ChainRenderer() }
         catch { renderer = nil; phase = .failed("Metal engine failed: \(error)"); return }
+
+        refreshLibrary()
 
         // Launch argument / env: a bake dir opens straight into the editor; a
         // subs folder is baked. Otherwise show the launch screen.
@@ -126,18 +133,76 @@ final class EngineModel: ObservableObject {
             func layer(_ n: String) throws -> FITSImage {
                 try FITSImage.read(dir.appendingPathComponent("\(n).fits"))
             }
-            bundle = renderer.makeBundle(
+            let b = renderer.makeBundle(
                 master: try layer("master"), denoised: try layer("denoised"),
                 starless: try layer("starless"), stars: try layer("stars"))
+            bundle = b
             look = Preset.auto.look; activePreset = .auto
             phase = .editing
+            // Pre-warm the Library thumbnail from the freshly-loaded bundle so a
+            // just-baked target shows a card instantly next time (no reload).
+            writeThumb(from: b, to: dir.appendingPathComponent("thumb.png"))
         } catch {
             phase = .failed("Failed to load layers: \(error)")
         }
     }
 
     func cancelBake() { baker.cancel(); reset() }
-    func reset() { bundle = nil; phase = .launch }
+    func reset() { bundle = nil; refreshLibrary(); phase = .launch }
+
+    // MARK: - Library
+
+    func refreshLibrary() { libraryTargets = Library.cachedTargets() }
+
+    /// Open a previously-developed target straight into the editor (already baked).
+    func openCached(_ t: CachedTarget) {
+        targetName = t.name
+        loadLayers(from: t.dir)
+    }
+
+    /// Load the disk thumbnail for a card, rendering + caching it on first sight.
+    /// FITS reads happen off the main actor; the quick GPU render stays on main.
+    func thumbnail(for t: CachedTarget) async -> NSImage? {
+        if let cached = thumbCache[t.id] { return cached }
+        if let disk = NSImage(contentsOf: t.thumbURL) {
+            thumbCache[t.id] = disk; return disk
+        }
+        guard let renderer else { return nil }
+        let dir = t.dir
+        let layers: (FITSImage, FITSImage, FITSImage, FITSImage)? =
+            await Task.detached(priority: .utility) {
+                guard let m = try? FITSImage.read(dir.appendingPathComponent("master.fits")),
+                      let d = try? FITSImage.read(dir.appendingPathComponent("denoised.fits")),
+                      let s = try? FITSImage.read(dir.appendingPathComponent("starless.fits")),
+                      let st = try? FITSImage.read(dir.appendingPathComponent("stars.fits"))
+                else { return nil }
+                return (m, d, s, st)
+            }.value
+        guard let (m, d, s, st) = layers else { return nil }
+        let b = renderer.makeBundle(master: m, denoised: d, starless: s, stars: st)
+        guard let cg = try? renderer.renderThumbnail(
+            bundle: b, params: Preset.auto.look.engineParams, maxDimension: 480)
+        else { return nil }
+        writeCGImagePNG(cg, to: t.thumbURL)
+        let img = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+        thumbCache[t.id] = img
+        return img
+    }
+
+    private func writeThumb(from bundle: ChainRenderer.LayerBundle, to url: URL) {
+        guard let renderer,
+              let cg = try? renderer.renderThumbnail(
+                bundle: bundle, params: Preset.auto.look.engineParams, maxDimension: 480)
+        else { return }
+        writeCGImagePNG(cg, to: url)
+    }
+
+    private func writeCGImagePNG(_ cg: CGImage, to url: URL) {
+        guard let dest = CGImageDestinationCreateWithURL(
+            url as CFURL, UTType.png.identifier as CFString, 1, nil) else { return }
+        CGImageDestinationAddImage(dest, cg, nil)
+        CGImageDestinationFinalize(dest)
+    }
 
     func apply(_ preset: Preset) { look = preset.look; activePreset = preset }
     func edited() { activePreset = Preset.matching(look) }
@@ -169,11 +234,26 @@ struct ContentView: View {
 
 // MARK: - Launch
 
+/// The home screen: a Library grid of previously-developed targets once any
+/// exist, or a first-run drop zone when the cache is empty. Dropping a folder
+/// (or "＋ Develop") always works — the photo-app "home", not a dead end.
 struct LaunchView: View {
     @EnvironmentObject var model: EngineModel
     @State private var targeted = false
 
     var body: some View {
+        Group {
+            if model.libraryTargets.isEmpty {
+                emptyState
+            } else {
+                library
+            }
+        }
+        .onDrop(of: [UTType.fileURL], isTargeted: $targeted) { handleDrop($0) }
+    }
+
+    // First run — the original big drop target.
+    private var emptyState: some View {
         VStack(spacing: 22) {
             Spacer()
             Image(systemName: "sparkles")
@@ -202,8 +282,35 @@ struct LaunchView: View {
             Spacer()
         }
         .padding(40)
-        .onDrop(of: [UTType.fileURL], isTargeted: $targeted) { providers in
-            handleDrop(providers)
+    }
+
+    // Populated Library — a grid of finished-look thumbnails.
+    private var library: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Nebula").font(.system(size: 26, weight: .semibold))
+                    .foregroundStyle(.white)
+                Spacer()
+                Button { chooseFolder() } label: {
+                    Label("Develop", systemImage: "plus")
+                }
+                .controlSize(.large).buttonStyle(.borderedProminent)
+            }
+            .padding(.horizontal, 24).padding(.top, 22).padding(.bottom, 16)
+
+            ScrollView {
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 150, maximum: 220), spacing: 18)],
+                    spacing: 18
+                ) {
+                    ForEach(model.libraryTargets) { target in
+                        LibraryCard(target: target)
+                            .onTapGesture { model.openCached(target) }
+                    }
+                }
+                .padding(24)
+            }
+            .background(targeted ? Color.white.opacity(0.05) : .clear)
         }
     }
 
@@ -222,6 +329,37 @@ struct LaunchView: View {
         panel.canChooseFiles = false
         panel.prompt = "Develop"
         if panel.runModal() == .OK, let url = panel.url { model.open(url) }
+    }
+}
+
+/// One Library cell: the cached finished-look thumbnail (rendered + cached on
+/// first sight) over the target name.
+struct LibraryCard: View {
+    @EnvironmentObject var model: EngineModel
+    let target: CachedTarget
+    @State private var image: NSImage?
+
+    var body: some View {
+        VStack(spacing: 8) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 12).fill(.white.opacity(0.06))
+                if let image {
+                    Image(nsImage: image)
+                        .resizable().scaledToFill()
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                } else {
+                    ProgressView().controlSize(.small)
+                }
+            }
+            .aspectRatio(3.0 / 4.0, contentMode: .fit)   // Seestar is portrait
+            .overlay(RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(.white.opacity(0.08), lineWidth: 1))
+
+            Text(target.name)
+                .font(.callout).foregroundStyle(.white.opacity(0.9))
+                .lineLimit(1).truncationMode(.middle)
+        }
+        .task(id: target.id) { image = await model.thumbnail(for: target) }
     }
 }
 

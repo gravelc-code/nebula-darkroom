@@ -50,7 +50,7 @@ final class BakeRunner {
             .appendingPathComponent(target, isDirectory: true)
     }
 
-    static func hasAllLayers(in dir: URL) -> Bool {
+    nonisolated static func hasAllLayers(in dir: URL) -> Bool {
         ["master", "starless", "stars", "denoised"].allSatisfy {
             FileManager.default.fileExists(atPath:
                 dir.appendingPathComponent("\($0).fits").path)
