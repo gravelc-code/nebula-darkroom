@@ -369,19 +369,23 @@ struct LibraryCard: View {
 
     var body: some View {
         VStack(spacing: 8) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 12).fill(.white.opacity(0.06))
-                if let image {
-                    Image(nsImage: image)
-                        .resizable().scaledToFill()
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                } else {
-                    ProgressView().controlSize(.small)
+            // Drive the cell size from a fixed 3:4 rectangle (Seestar is portrait)
+            // and hang the thumbnail as a clipped overlay, so a non-portrait image
+            // (e.g. synthetic subs) centre-crops into the frame instead of pushing
+            // the cell wider and overlapping neighbours.
+            RoundedRectangle(cornerRadius: 12)
+                .fill(.white.opacity(0.06))
+                .aspectRatio(3.0 / 4.0, contentMode: .fit)
+                .overlay {
+                    if let image {
+                        Image(nsImage: image).resizable().scaledToFill()
+                    } else {
+                        ProgressView().controlSize(.small)
+                    }
                 }
-            }
-            .aspectRatio(3.0 / 4.0, contentMode: .fit)   // Seestar is portrait
-            .overlay(RoundedRectangle(cornerRadius: 12)
-                .strokeBorder(.white.opacity(0.08), lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .overlay(RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(.white.opacity(0.08), lineWidth: 1))
 
             Text(target.name)
                 .font(.callout).foregroundStyle(.white.opacity(0.9))
