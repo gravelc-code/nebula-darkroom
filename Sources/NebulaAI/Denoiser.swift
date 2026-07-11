@@ -66,6 +66,7 @@ func medianOf(_ v: [Float]) -> Float {
 public final class Denoiser {
     private let model: OrtModel
     private let window = 256, stride = 128
+    private let batchSize = 8                   // tiles per model.run
     private let modelThreshold: Float = 10.0   // 3.x models
 
     public init(modelPath: String, useCoreML: Bool = false) throws {
@@ -119,35 +120,48 @@ public final class Denoiser {
 
         var output = img              // written in stride blocks, cropped at the end
         let pw = img.w
+        let tileFloats = window * window * 3
 
-        for i in 0..<ith {
-            for j in 0..<itw {
+        // Run tiles in batches through one model.run — same per-tile math as a
+        // 1-at-a-time loop (bit-identical), but amortizes the per-call overhead.
+        var jobs: [(Int, Int)] = []
+        for i in 0..<ith { for j in 0..<itw { jobs.append((i, j)) } }
+
+        var jb = 0
+        while jb < jobs.count {
+            let n = min(batchSize, jobs.count - jb)
+            var input = [Float](repeating: 0, count: n * tileFloats)
+            var copy = [Float](repeating: 0, count: n * tileFloats)
+            for b in 0..<n {
+                let (i, j) = jobs[jb + b]
                 let x = stride * i, y = stride * j
-                // Build normalized tile + keep a copy for the keep-bright mask.
-                var tile = [Float](repeating: 0, count: window * window * 3)
-                var copy = [Float](repeating: 0, count: window * window * 3)
+                let base = b * tileFloats
                 for ty in 0..<window {
                     let srcRow = (x + ty) * pw
                     for tx in 0..<window {
                         let s = (srcRow + (y + tx)) * 3
-                        let t = (ty * window + tx) * 3
+                        let t = base + (ty * window + tx) * 3
                         for ch in 0..<3 {
                             let norm = (img.d[s + ch] - med3[ch]) / mad3[ch] * 0.04
                             copy[t + ch] = norm
-                            tile[t + ch] = min(max(norm, -modelThreshold), modelThreshold)
+                            input[t + ch] = min(max(norm, -modelThreshold), modelThreshold)
                         }
                     }
                 }
+            }
 
-                let result = try model.run(tile, shape: [1, window, window, 3])
+            let result = try model.run(input, shape: [n, window, window, 3])
 
-                // keep-bright, denormalize, crop center stride, place into output.
+            for b in 0..<n {
+                let (i, j) = jobs[jb + b]
+                let x = stride * i, y = stride * j
+                let base = b * tileFloats
                 for oy in 0..<stride {
                     let ty = oy + offset
                     let dstRow = (x + offset + oy) * pw
                     for ox in 0..<stride {
                         let tx = ox + offset
-                        let t = (ty * window + tx) * 3
+                        let t = base + (ty * window + tx) * 3
                         let dst = (dstRow + (y + offset + ox)) * 3
                         for ch in 0..<3 {
                             var v = copy[t + ch] < modelThreshold ? result[t + ch] : copy[t + ch]
@@ -157,6 +171,7 @@ public final class Denoiser {
                     }
                 }
             }
+            jb += n
         }
 
         // Crop padding: output[offset:H+offset, offset:W+offset], back to c channels.
