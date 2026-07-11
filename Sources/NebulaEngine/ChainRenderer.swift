@@ -66,6 +66,9 @@ public struct StarStretch {
     }
 }
 
+/// Blit params — field order MUST match `BlitUniforms` in the shader source.
+struct BlitUniforms { var divider: Float; var compare: Float }
+
 /// Per-channel auto base stretch (black point + MTF midtone) from image
 /// statistics, mirroring Siril's autostretch: shadow = median − 2.8·σ (via MAD),
 /// midtone so the background lands at a low target. Computed once per bundle; the
@@ -109,6 +112,7 @@ public final class ChainRenderer {
     let queue: MTLCommandQueue
     let processPipeline: MTLComputePipelineState
     let finishPipeline: MTLComputePipelineState
+    let beforePipeline: MTLComputePipelineState
     let blitPipeline: MTLRenderPipelineState
 
     public static let drawablePixelFormat: MTLPixelFormat = .bgra8Unorm
@@ -124,6 +128,8 @@ public final class ChainRenderer {
             function: lib.makeFunction(name: "processNebula")!)
         self.finishPipeline = try device.makeComputePipelineState(
             function: lib.makeFunction(name: "finish")!)
+        self.beforePipeline = try device.makeComputePipelineState(
+            function: lib.makeFunction(name: "stretchBefore")!)
         let rpd = MTLRenderPipelineDescriptor()
         rpd.vertexFunction = lib.makeFunction(name: "blitVertex")
         rpd.fragmentFunction = lib.makeFunction(name: "blitFragment")
@@ -135,16 +141,17 @@ public final class ChainRenderer {
     /// intermediate/output textures and the cached auto stretch.
     public final class LayerBundle {
         let master, denoised, starless, stars: MTLTexture
-        let nebTex, outTex: MTLTexture
+        let nebTex, outTex, beforeTex: MTLTexture
         public let width: Int, height: Int
         let auto: AutoStretch
         let star: StarStretch
         init(master: MTLTexture, denoised: MTLTexture, starless: MTLTexture,
              stars: MTLTexture, nebTex: MTLTexture, outTex: MTLTexture,
-             width: Int, height: Int, auto: AutoStretch, star: StarStretch) {
+             beforeTex: MTLTexture, width: Int, height: Int,
+             auto: AutoStretch, star: StarStretch) {
             self.master = master; self.denoised = denoised
             self.starless = starless; self.stars = stars
-            self.nebTex = nebTex; self.outTex = outTex
+            self.nebTex = nebTex; self.outTex = outTex; self.beforeTex = beforeTex
             self.width = width; self.height = height; self.auto = auto; self.star = star
         }
     }
@@ -171,14 +178,36 @@ public final class ChainRenderer {
     public func makeBundle(master: FITSImage, denoised: FITSImage,
                            starless: FITSImage, stars: FITSImage) -> LayerBundle {
         let (w, h) = (master.width, master.height)
-        return LayerBundle(
-            master: upload(master), denoised: upload(denoised),
+        let auto = AutoStretch(base: starless), star = StarStretch(base: stars)
+        let masterTex = upload(master)
+        // outTex/beforeTex are mipmapped so the fit-to-window preview downsamples
+        // faithfully (faint stars survive); the compute writes mip 0.
+        let bundle = LayerBundle(
+            master: masterTex, denoised: upload(denoised),
             starless: upload(starless), stars: upload(stars),
-            // outTex is mipmapped so the fit-to-window preview downsamples
-            // faithfully (faint stars survive); the compute writes mip 0.
             nebTex: scratch(w, h), outTex: scratch(w, h, mipmapped: true),
-            width: w, height: h,
-            auto: AutoStretch(base: starless), star: StarStretch(base: stars))
+            beforeTex: scratch(w, h, mipmapped: true),
+            width: w, height: h, auto: auto, star: star)
+        renderBefore(bundle)
+        return bundle
+    }
+
+    /// Render the static "before" (raw stack, auto-stretched) once.
+    private func renderBefore(_ b: LayerBundle) {
+        var u = EngineParamsGPU(Preset.auto.look.engineParams, auto: b.auto, star: b.star)
+        let tpg = MTLSize(width: 16, height: 16, depth: 1)
+        let grid = MTLSize(width: (b.width + 15) / 16, height: (b.height + 15) / 16, depth: 1)
+        let cmd = queue.makeCommandBuffer()!
+        let e = cmd.makeComputeCommandEncoder()!
+        e.setComputePipelineState(beforePipeline)
+        e.setTextures([b.master, b.beforeTex], range: 0..<2)
+        e.setBytes(&u, length: MemoryLayout<EngineParamsGPU>.stride, index: 0)
+        e.dispatchThreadgroups(grid, threadsPerThreadgroup: tpg)
+        e.endEncoding()
+        let blit = cmd.makeBlitCommandEncoder()!
+        blit.generateMipmaps(for: b.beforeTex)
+        blit.endEncoding()
+        cmd.commit(); cmd.waitUntilCompleted()
     }
 
     /// Encode the two compute passes into `cmd`, leaving the result in `outTex`.
@@ -205,7 +234,8 @@ public final class ChainRenderer {
 
     /// Live path: render the chain result into the view's drawable every frame.
     /// Slider input only mutates `params`; the loop always draws current params.
-    public func draw(bundle: LayerBundle, params: EngineParams, in view: MTKView) {
+    public func draw(bundle: LayerBundle, params: EngineParams,
+                     compare: Bool = false, divider: Float = 0.5, in view: MTKView) {
         guard let drawable = view.currentDrawable,
               let rpd = view.currentRenderPassDescriptor else { return }
         let cmd = queue.makeCommandBuffer()!
@@ -216,9 +246,12 @@ public final class ChainRenderer {
             blit.generateMipmaps(for: bundle.outTex)
             blit.endEncoding()
         }
+        var bu = BlitUniforms(divider: divider, compare: compare ? 1 : 0)
         let enc = cmd.makeRenderCommandEncoder(descriptor: rpd)!
         enc.setRenderPipelineState(blitPipeline)
         enc.setFragmentTexture(bundle.outTex, index: 0)
+        enc.setFragmentTexture(bundle.beforeTex, index: 1)
+        enc.setFragmentBytes(&bu, length: MemoryLayout<BlitUniforms>.stride, index: 0)
         enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         enc.endEncoding()
         cmd.present(drawable)

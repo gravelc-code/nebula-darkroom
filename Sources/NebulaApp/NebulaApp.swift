@@ -34,6 +34,8 @@ final class EngineModel: ObservableObject {
     let loadError: String?
     @Published var look: LookState = Preset.auto.look
     @Published var activePreset: Preset? = .auto
+    @Published var compare = false
+    @Published var divider: Float = 0.5
 
     var params: EngineParams { look.engineParams }
 
@@ -84,10 +86,17 @@ struct ContentView: View {
         ZStack {
             Color.black.ignoresSafeArea()
             if let renderer = model.renderer, let bundle = model.bundle {
-                HeroView(renderer: renderer, bundle: bundle, model: model)
-                    .aspectRatio(CGFloat(bundle.width) / CGFloat(bundle.height),
-                                 contentMode: .fit)
-                    .ignoresSafeArea()
+                GeometryReader { geo in
+                    HeroView(renderer: renderer, bundle: bundle, model: model)
+                        .gesture(DragGesture(minimumDistance: 0).onChanged { v in
+                            if model.compare {
+                                model.divider = Float(max(0, min(1, v.location.x / geo.size.width)))
+                            }
+                        })
+                }
+                .aspectRatio(CGFloat(bundle.width) / CGFloat(bundle.height),
+                             contentMode: .fit)
+                .ignoresSafeArea()
                 controls
             } else {
                 Text(model.loadError ?? "No engine")
@@ -109,6 +118,9 @@ struct ContentView: View {
                             .fontWeight(model.activePreset == p ? .semibold : .regular)
                     }
                     Spacer()
+                    Button(model.compare ? "Compare ✓" : "Compare") { model.compare.toggle() }
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(model.compare ? .white : .secondary)
                     Button("Export…") { exportImage() }
                         .buttonStyle(.borderless).foregroundStyle(.white)
                 }
@@ -178,7 +190,8 @@ struct HeroView: NSViewRepresentable {
         }
         func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
         func draw(in view: MTKView) {
-            renderer.draw(bundle: bundle, params: model.params, in: view)
+            renderer.draw(bundle: bundle, params: model.params,
+                          compare: model.compare, divider: model.divider, in: view)
         }
     }
 }
