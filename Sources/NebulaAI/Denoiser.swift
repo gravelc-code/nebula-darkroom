@@ -129,6 +129,7 @@ public final class Denoiser {
 
         var jb = 0
         while jb < jobs.count {
+            try Task.checkCancellation()      // stop promptly if the bake is cancelled
             let n = min(batchSize, jobs.count - jb)
             var input = [Float](repeating: 0, count: n * tileFloats)
             var copy = [Float](repeating: 0, count: n * tileFloats)

@@ -85,7 +85,11 @@ public struct SirilStage {
         p.standardOutput = logHandle
         p.standardError = logHandle
         try p.run()
-        p.waitUntilExit()
+        // Poll instead of waitUntilExit so a cancelled bake can terminate Siril.
+        while p.isRunning {
+            if Task.isCancelled { p.terminate(); try? logHandle.close(); throw CancellationError() }
+            Thread.sleep(forTimeInterval: 0.2)
+        }
         try? logHandle.close()
 
         let produced = sirilWork.appendingPathComponent("master.fits")

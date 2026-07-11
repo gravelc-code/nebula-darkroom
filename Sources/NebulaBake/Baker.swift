@@ -45,6 +45,7 @@ public struct Baker {
         let stackHWC = stack.hwcPixels()
 
         // --- 2. Background removal (in-process) -> the master layer ---------
+        try Task.checkCancellation()
         onProgress(Progress(fraction: 0.35, status: "Removing sky gradient…"))
         let masterHWC: [Float]
         if let bge = bgeModel ?? discover("bge-ai-models", "NEBULA_BGE_MODEL") {
