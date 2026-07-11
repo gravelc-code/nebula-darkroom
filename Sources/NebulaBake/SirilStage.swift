@@ -29,6 +29,9 @@ public struct SirilStage {
     static func discover() -> String? {
         let fm = FileManager.default
         if let e = ProcessInfo.processInfo.environment["SIRIL_BIN"], fm.isExecutableFile(atPath: e) { return e }
+        // Shipped app: Siril bundled in Nebula.app/Contents/Resources/siril/siril.
+        if let u = Bundle.main.resourceURL?.appendingPathComponent("siril/siril"),
+           fm.isExecutableFile(atPath: u.path) { return u.path }
         for p in ["/opt/homebrew/bin/siril", "/usr/local/bin/siril", "/usr/bin/siril"]
         where fm.isExecutableFile(atPath: p) { return p }
         return nil
