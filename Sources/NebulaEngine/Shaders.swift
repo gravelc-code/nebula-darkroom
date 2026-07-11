@@ -14,6 +14,24 @@ let shaderSource = """
 #include <metal_stdlib>
 using namespace metal;
 
+// ---- fullscreen blit: draw the rgba32Float result into the drawable ---------
+struct BlitOut { float4 pos [[position]]; float2 uv; };
+
+vertex BlitOut blitVertex(uint vid [[vertex_id]]) {
+    // Single oversized triangle covering the viewport.
+    float2 p = float2((vid == 2) ? 3.0 : -1.0, (vid == 1) ? 3.0 : -1.0);
+    BlitOut o;
+    o.pos = float4(p, 0.0, 1.0);
+    o.uv = float2((p.x + 1.0) * 0.5, 1.0 - (p.y + 1.0) * 0.5);   // flip Y
+    return o;
+}
+
+fragment float4 blitFragment(BlitOut in [[stage_in]],
+                             texture2d<float> tex [[texture(0)]]) {
+    constexpr sampler s(filter::linear, address::clamp_to_edge);
+    return float4(tex.sample(s, in.uv).rgb, 1.0);
+}
+
 struct Uniforms {
     float denoiseBlend;
     float blackPoint;

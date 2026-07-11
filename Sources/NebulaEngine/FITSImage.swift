@@ -5,17 +5,17 @@ import Foundation
 /// `BITPIX=-32`, big-endian, 2-D (H,W) mono or 3-D (3,H,W) plane-separated RGB —
 /// rather than the whole FITS standard. This honours the manifest's FITS
 /// interchange contract without pulling in a dependency.
-struct FITSImage {
-    let width: Int
-    let height: Int
-    let channels: Int          // 1 or 3
+public struct FITSImage {
+    public let width: Int
+    public let height: Int
+    public let channels: Int          // 1 or 3
     /// Interleaved RGBA float pixels (row-major, `height * width * 4`), alpha = 1.
     /// Mono layers are broadcast to R=G=B so the shader path is uniform.
-    var rgba: [Float]
+    public var rgba: [Float]
 
-    enum FITSError: Error { case badHeader(String), truncated }
+    public enum FITSError: Error { case badHeader(String), truncated }
 
-    static func read(_ url: URL) throws -> FITSImage {
+    public static func read(_ url: URL) throws -> FITSImage {
         let data = try Data(contentsOf: url)
 
         // FITS headers are 2880-byte blocks of 80-char "KEYWORD = value" cards,

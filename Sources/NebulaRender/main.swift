@@ -1,13 +1,14 @@
 import Foundation
 import NebulaCore
+import NebulaEngine
 
 // nebula-render <layers_dir> <preset> <out.png>
 //   layers_dir : a bake output dir with master/denoised/starless/stars .fits
 //   preset     : auto | natural | vivid | deep
 //   out.png    : where to write the rendered frame
 //
-// Phase 1 kernel de-risk: prove the Metal Stage-B chain on real baked layers,
-// driven purely by EngineParams. Same code path as preview and (future) export.
+// Headless export path — the same ChainRenderer the live app uses, so the PNG
+// here equals what the interactive preview shows.
 
 let args = CommandLine.arguments
 guard args.count == 4 else {
@@ -27,16 +28,12 @@ func layer(_ name: String) throws -> FITSImage {
 }
 
 do {
-    let master   = try layer("master")
-    let denoised = try layer("denoised")
-    let starless = try layer("starless")
-    let stars    = try layer("stars")
-
-    let params = preset.look.engineParams
-    let renderer = try Renderer()
-    try renderer.render(master: master, denoised: denoised, starless: starless,
-                        stars: stars, params: params, to: out)
-    print("rendered \(preset.displayName) → \(out.path)  (\(master.width)×\(master.height))")
+    let renderer = try ChainRenderer()
+    let bundle = renderer.makeBundle(
+        master: try layer("master"), denoised: try layer("denoised"),
+        starless: try layer("starless"), stars: try layer("stars"))
+    try renderer.renderPNG(bundle: bundle, params: preset.look.engineParams, to: out)
+    print("rendered \(preset.displayName) → \(out.path)  (\(bundle.width)×\(bundle.height))")
 } catch {
     FileHandle.standardError.write(Data("error: \(error)\n".utf8))
     exit(1)
