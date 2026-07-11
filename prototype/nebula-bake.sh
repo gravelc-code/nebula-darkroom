@@ -30,7 +30,21 @@ args=("$@")
 # absent-tool fallback in bake.py kicks in cleanly instead of erroring.
 # Templates are .format()'d then run via shell=True, so quote the placeholders —
 # bake output paths (e.g. out/"M 83") can contain spaces.
-if [ -n "${GRAXPERT_BIN:-}" ]; then
+#
+# Prefer the native Swift `nebula-ai` (Phase 2: in-process ORT, no external
+# GraXpert.app) for background-removal + denoise. Falls back to the GraXpert
+# subprocess only if the native binary isn't built/bundled.
+NEBULA_AI="${NEBULA_AI:-}"
+if [ -z "$NEBULA_AI" ]; then
+    for cand in "/tmp/nebula-build/debug/nebula-ai" "$HERE/../.build/debug/nebula-ai" \
+                "$HERE/../.build/release/nebula-ai"; do
+        [ -x "$cand" ] && NEBULA_AI="$cand" && break
+    done
+fi
+if [ -n "$NEBULA_AI" ]; then
+    args+=(--graxpert "'$NEBULA_AI' bg '{input}' '{output}'")
+    args+=(--denoise  "'$NEBULA_AI' denoise '{input}' '{output}'")
+elif [ -n "${GRAXPERT_BIN:-}" ]; then
     args+=(--graxpert "'$AITOOLS/gx_bg.sh' '{input}' '{output}'")
     args+=(--denoise  "'$AITOOLS/gx_denoise.sh' '{input}' '{output}'")
 fi
