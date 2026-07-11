@@ -19,8 +19,10 @@ let package = Package(
         // The interactive app: MTKView display-link loop + SwiftUI sliders.
         .executable(name: "NebulaApp", targets: ["NebulaApp"]),
         // Phase 2: native in-process AI (GraXpert models via onnxruntime),
-        // replacing the GraXpert subprocess. Probe proves ORT links from Swift.
-        .executable(name: "nebula-ai-probe", targets: ["NebulaAIProbe"])
+        // replacing the GraXpert subprocess. Probe proves ORT links from Swift;
+        // nebula-ai is the FITS-in/FITS-out tool the bake wrappers call.
+        .executable(name: "nebula-ai-probe", targets: ["NebulaAIProbe"]),
+        .executable(name: "nebula-ai", targets: ["NebulaAICLI"])
     ],
     dependencies: [
         // onnxruntime C/Obj-C runtime as a binary xcframework. Pinned to 1.19.2
@@ -47,6 +49,10 @@ let package = Package(
         .executableTarget(
             name: "NebulaAIProbe",
             dependencies: ["NebulaAI"]
+        ),
+        .executableTarget(
+            name: "NebulaAICLI",
+            dependencies: ["NebulaAI", "NebulaEngine"]
         ),
         .executableTarget(
             name: "NebulaRender",

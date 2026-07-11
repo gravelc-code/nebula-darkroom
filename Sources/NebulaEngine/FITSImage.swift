@@ -13,6 +13,10 @@ public struct FITSImage: Sendable {
     /// Mono layers are broadcast to R=G=B so the shader path is uniform.
     public var rgba: [Float]
 
+    public init(width: Int, height: Int, channels: Int, rgba: [Float]) {
+        self.width = width; self.height = height; self.channels = channels; self.rgba = rgba
+    }
+
     public enum FITSError: Error { case badHeader(String), truncated }
 
     public static func read(_ url: URL) throws -> FITSImage {
@@ -83,5 +87,46 @@ public struct FITSImage: Sendable {
             }
         }
         return FITSImage(width: w, height: h, channels: ch, rgba: rgba)
+    }
+
+    /// Write the same narrow float32 FITS the bake consumes: `BITPIX=-32`,
+    /// big-endian, 2-D `(H,W)` mono or 3-D `(3,H,W)` plane-separated RGB. Round-
+    /// trips with `read` and is read by the Python bake's astropy.
+    public func write(_ url: URL) throws {
+        // --- Header: 80-char cards, `END`, padded to a 2880-byte block. ---
+        func card(_ keyword: String, _ value: String) -> String {
+            let kv = keyword.padding(toLength: 8, withPad: " ", startingAt: 0)
+                + "= " + String(repeating: " ", count: max(0, 20 - value.count)) + value
+            return kv.padding(toLength: 80, withPad: " ", startingAt: 0)
+        }
+        var header = ""
+        header += card("SIMPLE", "T")
+        header += card("BITPIX", "-32")
+        header += card("NAXIS", channels == 3 ? "3" : "2")
+        header += card("NAXIS1", String(width))
+        header += card("NAXIS2", String(height))
+        if channels == 3 { header += card("NAXIS3", "3") }
+        header += "END".padding(toLength: 80, withPad: " ", startingAt: 0)
+        while header.count % 2880 != 0 { header += String(repeating: " ", count: 80) }
+
+        var data = Data(header.utf8)
+
+        // --- Data: plane-separated big-endian float32 (all R, then G, then B). ---
+        let plane = width * height
+        let planeCount = channels == 3 ? 3 : 1
+        var floats = [UInt32](repeating: 0, count: plane * planeCount)
+        for p in 0..<plane {
+            for c in 0..<planeCount {
+                let v = rgba[p * 4 + c]              // mono: c==0 (R==G==B)
+                floats[c * plane + p] = v.bitPattern.bigEndian
+            }
+        }
+        floats.withUnsafeBytes { data.append(contentsOf: $0) }
+
+        // Pad the data unit to a 2880-byte block.
+        let rem = data.count % 2880
+        if rem != 0 { data.append(Data(count: 2880 - rem)) }
+
+        try data.write(to: url)
     }
 }
