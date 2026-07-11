@@ -43,6 +43,23 @@ final class BakeRunner {
         return nil
     }
 
+    /// Environment for the bake subprocess, with the AI tools auto-discovered in
+    /// their standard install locations. This is the "simple to install" seam: a
+    /// normally-installed GraXpert / StarNet just works, with no env-var setup —
+    /// the bake's per-step fallback still covers whatever isn't installed. An
+    /// explicit env var always wins (dev override), so we only fill in blanks.
+    static func toolEnvironment() -> [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        let fm = FileManager.default
+        func fill(_ key: String, ifExecutable path: String) {
+            if env[key] == nil, fm.isExecutableFile(atPath: path) { env[key] = path }
+        }
+        // GraXpert.app installed the normal way (drag to /Applications).
+        fill("GRAXPERT_BIN", ifExecutable:
+             "/Applications/GraXpert.app/Contents/MacOS/GraXpert")
+        return env
+    }
+
     /// A stable per-target bake cache: `~/Library/Caches/Nebula/<target>`.
     static func cacheDir(forTarget target: String) -> URL {
         FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
@@ -78,6 +95,7 @@ final class BakeRunner {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/bash")
         p.arguments = [script.path, subsDir.path, "--out", out.path]
+        p.environment = Self.toolEnvironment()
         let pipe = Pipe()
         p.standardOutput = pipe
         p.standardError = pipe

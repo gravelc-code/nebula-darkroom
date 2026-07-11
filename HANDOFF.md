@@ -104,14 +104,17 @@ Engine = `Sources/NebulaRender/`. Same shaders drive the live view + 16-bit expo
 ## Running the app (Phase 4)
 ```bash
 swift build --product NebulaApp --scratch-path /tmp/nebula-build
-# Real-AI bake: point the wrappers at your tools (each step falls back to a
-# numerical stand-in if its var is unset, so the app always runs end-to-end):
-export GRAXPERT_BIN=/path/to/GraXpert.app/Contents/MacOS/GraXpert
-export STARNET_BIN=/path/to/StarNetBin/starnet2
-export STARNET_WEIGHTS=/path/to/StarNetBin/StarNet2_weights.pt
-/tmp/nebula-build/debug/NebulaApp            # launch screen: drop a "…_subs" folder
+/tmp/nebula-build/debug/NebulaApp            # home: Library grid / drop a "…_subs" folder
 /tmp/nebula-build/debug/NebulaApp <folder>   # or open a subs folder / bake dir directly
 ```
+**AI tools ("simple to install"):** the app **auto-discovers GraXpert** at the
+standard `/Applications/GraXpert.app` (drag-install the 3.0.2 arm64 DMG —
+`BakeRunner.toolEnvironment()`), so background-removal + denoise "just work" with
+zero setup. Each AI step still falls back to a numerical stand-in if its tool is
+absent, so the app always runs end-to-end. StarNet star-separation is not yet
+auto-discovered — set `STARNET_BIN` / `STARNET_WEIGHTS` to enable it (until then
+it falls back to `starless = master`, i.e. no independent star control). An
+explicit env var always overrides discovery (dev override).
 The app shells out to **`prototype/nebula-bake.sh`** (found via `NEBULA_BAKE` or by
 walking up from the CWD to the repo root). That script wires the durable,
 env-configured AI wrappers in **`prototype/aitools/`** (`gx_bg.sh`, `gx_denoise.sh`,
