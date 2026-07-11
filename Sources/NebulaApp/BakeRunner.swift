@@ -71,6 +71,9 @@ final class BakeRunner {
             return .failure("Bake script not found. Set NEBULA_BAKE or run from the repo root.")
         }
         try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
+        // Remember where this bake came from so the Library can offer "Re-develop".
+        try? subsDir.path.write(to: out.appendingPathComponent("source.txt"),
+                                atomically: true, encoding: .utf8)
 
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/bash")

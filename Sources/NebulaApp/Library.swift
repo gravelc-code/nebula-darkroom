@@ -7,6 +7,7 @@ struct CachedTarget: Identifiable, Hashable {
     let name: String          // cache-dir name == the clean target name
     let dir: URL              // the bake dir (holds master/denoised/starless/stars)
     let modified: Date        // newest layer mtime → sort most-recent first
+    let sourceSubs: URL?      // the subs folder it was baked from, if still known
 
     var id: String { dir.path }
     var thumbURL: URL { dir.appendingPathComponent("thumb.png") }
@@ -29,7 +30,12 @@ enum Library {
             let modified = (try? dir.appendingPathComponent("master.fits")
                 .resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)
                 ?? .distantPast
-            return CachedTarget(name: dir.lastPathComponent, dir: dir, modified: modified)
+            let source = (try? String(contentsOf: dir.appendingPathComponent("source.txt"),
+                                      encoding: .utf8))
+                .map { URL(fileURLWithPath: $0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+                .flatMap { fm.fileExists(atPath: $0.path) ? $0 : nil }
+            return CachedTarget(name: dir.lastPathComponent, dir: dir,
+                                modified: modified, sourceSubs: source)
         }
         .sorted { $0.modified > $1.modified }
     }

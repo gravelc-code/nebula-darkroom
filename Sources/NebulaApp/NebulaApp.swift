@@ -160,6 +160,23 @@ final class EngineModel: ObservableObject {
         loadLayers(from: t.dir)
     }
 
+    /// Wipe a target's cached bake and re-run it from its remembered subs folder.
+    /// (Removing the layers forces a real bake instead of a cache hit.)
+    func redevelop(_ t: CachedTarget) {
+        guard let src = t.sourceSubs else { return }
+        try? FileManager.default.removeItem(at: t.dir)
+        thumbCache[t.id] = nil
+        targetName = t.name
+        startBake(subsDir: src)
+    }
+
+    /// Forget a target: delete its cached bake and drop it from the grid.
+    func deleteTarget(_ t: CachedTarget) {
+        try? FileManager.default.removeItem(at: t.dir)
+        thumbCache[t.id] = nil
+        refreshLibrary()
+    }
+
     /// Load the disk thumbnail for a card, rendering + caching it on first sight.
     /// FITS reads happen off the main actor; the quick GPU render stays on main.
     func thumbnail(for t: CachedTarget) async -> NSImage? {
@@ -360,6 +377,17 @@ struct LibraryCard: View {
                 .lineLimit(1).truncationMode(.middle)
         }
         .task(id: target.id) { image = await model.thumbnail(for: target) }
+        .contextMenu {
+            Button("Open") { model.openCached(target) }
+            if target.sourceSubs != nil {
+                Button("Re-develop") { model.redevelop(target) }
+            }
+            Button("Show in Finder") {
+                NSWorkspace.shared.activateFileViewerSelecting([target.dir])
+            }
+            Divider()
+            Button("Delete", role: .destructive) { model.deleteTarget(target) }
+        }
     }
 }
 
