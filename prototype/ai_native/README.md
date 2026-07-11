@@ -20,6 +20,18 @@ external `GraXpert.app` subprocess dependency — the real "simple to install" w
   `onnxruntime-objc`), port these two pipelines to Swift, run in-process, and
   retire the GraXpert subprocess from `BakeRunner` / the aitools wrappers.
 
+## Execution provider: CPU (CoreML EP doesn't help)
+
+The Swift `OrtModel` runs on ORT's **CPU EP**. ORT's CoreML EP was tried and is a
+dead end for these models: the **denoise** graph fails to compile
+(`Espresso "Invalid blob shape" … cannot broadcast (1,300,1,1) vs (1,123,1,1)`),
+and with `onlyAllowStaticInputShapes` it silently falls back to CPU;
+`createMLProgram` crashes ("zero compute device types"). The single-pass **bge**
+model *does* run on CoreML but is *slower* than CPU (6.7 s vs 2.9 s — per-run
+compile overhead). CPU denoise (~136 s/frame) is already comparable to GraXpert's
+own runtime, so there's little to gain. A real future win is **tile-batching**
+the denoise inference (GraXpert batches 4).
+
 ## Dev-only tooling (installed in prototype/.venv)
 `onnx`, `onnxruntime`, `coremltools`, `opencv-python-headless<4.11` (numpy-1.x
 compatible — cv2 5.x forces numpy 2 and breaks astropy). Keep `numpy<2`.

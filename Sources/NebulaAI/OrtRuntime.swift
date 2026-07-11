@@ -10,9 +10,20 @@ public final class OrtModel {
     public let inputName: String
     public let outputName: String
 
-    public init(modelPath: String) throws {
+    /// Loads the model on the **CPU** execution provider by default — which is
+    /// bit-exact with the Python spikes and, for these GraXpert models, the right
+    /// call: ORT's CoreML EP won't compile the denoise graph (Espresso broadcast
+    /// error / falls back to CPU under `onlyAllowStaticInputShapes`) and is
+    /// *slower* than CPU for the single-pass bge model (compile overhead). CPU
+    /// denoise (~136 s/frame) is already comparable to GraXpert's own runtime, so
+    /// there's little to gain. `useCoreML` is kept for a future compatible model.
+    public init(modelPath: String, useCoreML: Bool = false) throws {
         env = try ORTEnv(loggingLevel: ORTLoggingLevel.warning)
-        session = try ORTSession(env: env, modelPath: modelPath, sessionOptions: nil)
+        let options = try ORTSessionOptions()
+        if useCoreML && ORTIsCoreMLExecutionProviderAvailable() {
+            try options.appendCoreMLExecutionProvider(with: ORTCoreMLExecutionProviderOptions())
+        }
+        session = try ORTSession(env: env, modelPath: modelPath, sessionOptions: options)
         inputName = try session.inputNames().first ?? "gen_input_image"
         outputName = try session.outputNames().first ?? "output"
     }

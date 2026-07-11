@@ -10,7 +10,9 @@ import Foundation
 public final class BgExtractor {
     private let model: OrtModel
 
-    public init(modelPath: String) throws { model = try OrtModel(modelPath: modelPath) }
+    public init(modelPath: String, useCoreML: Bool = false) throws {
+        model = try OrtModel(modelPath: modelPath, useCoreML: useCoreML)
+    }
 
     /// `pixels` is row-major HxWxC in [0,1]; returns the background-subtracted image.
     public func extract(pixels: [Float], h: Int, w: Int, c: Int,

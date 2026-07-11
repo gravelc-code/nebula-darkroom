@@ -68,7 +68,9 @@ public final class Denoiser {
     private let window = 256, stride = 128
     private let modelThreshold: Float = 10.0   // 3.x models
 
-    public init(modelPath: String) throws { model = try OrtModel(modelPath: modelPath) }
+    public init(modelPath: String, useCoreML: Bool = false) throws {
+        model = try OrtModel(modelPath: modelPath, useCoreML: useCoreML)
+    }
 
     /// `pixels` is row-major HxWxC (C = 1 or 3), values in [0,1]. Returns same shape.
     public func denoise(pixels: [Float], h: Int, w: Int, c: Int,
