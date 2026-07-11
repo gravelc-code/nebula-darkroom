@@ -169,6 +169,7 @@ final class EngineModel: ObservableObject {
     /// background and appears in the Library. Also develops any already present.
     func startWatching(_ url: URL) {
         watchRoot = url
+        Notifier.requestAuthorization()
         let w = FolderWatcher(root: url) { [weak self] subs in self?.autoBake(subsDir: subs) }
         watcher = w
         w.start()
@@ -189,10 +190,18 @@ final class EngineModel: ObservableObject {
         autoBaking.insert(name)
         Task { [weak self] in
             let runner = BakeRunner()
-            _ = await runner.bake(subsDir: subsDir, target: name, onProgress: { _ in })
+            let outcome = await runner.bake(subsDir: subsDir, target: name, onProgress: { _ in })
             guard let self else { return }
             self.autoBaking.remove(name)
             self.refreshLibrary()
+            if case .success = outcome {
+                // Warm the Library thumbnail, then notify with it.
+                if let target = self.libraryTargets.first(where: { $0.name == name }) {
+                    _ = await self.thumbnail(for: target)
+                }
+                Notifier.developed(name, thumbURL: BakeRunner.cacheDir(forTarget: name)
+                    .appendingPathComponent("thumb.png"))
+            }
         }
     }
 
