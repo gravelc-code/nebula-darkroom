@@ -142,12 +142,19 @@ public struct Baker {
     }
 
     private func discover(_ base: String, _ env: String) -> String? {
-        if let e = ProcessInfo.processInfo.environment[env], FileManager.default.fileExists(atPath: e) { return e }
+        let fm = FileManager.default
+        if let e = ProcessInfo.processInfo.environment[env], fm.fileExists(atPath: e) { return e }
+        // Shipped app: the model bundled in Nebula.app/Contents/Resources/Models.
+        let bundled = base.contains("denoise") ? "denoise" : "bge"
+        if let u = Bundle.main.url(forResource: bundled, withExtension: "onnx", subdirectory: "Models") {
+            return u.path
+        }
+        // Dev: the GraXpert model cache.
         let root = NSString(string: "~/Library/Application Support/GraXpert/\(base)").expandingTildeInPath
-        guard let versions = try? FileManager.default.contentsOfDirectory(atPath: root) else { return nil }
+        guard let versions = try? fm.contentsOfDirectory(atPath: root) else { return nil }
         for v in versions.sorted(by: >) {
             let cand = "\(root)/\(v)/model.onnx"
-            if FileManager.default.fileExists(atPath: cand) { return cand }
+            if fm.fileExists(atPath: cand) { return cand }
         }
         return nil
     }
