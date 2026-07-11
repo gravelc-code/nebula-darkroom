@@ -13,8 +13,8 @@ plan lives outside the repo at `~/.claude/plans/have-a-look-at-floating-narwhal.
 | **0 · Prove the bake** | ✅ **Acceptance met.** Proven end-to-end on real subs (M83, 67×30s) with real GraXpert (bg+denoise) + StarNet (separation); decisively beat the Seestar JPEG. Recipe below. |
 | **1 · Metal engine** | ✅ **Done.** `NebulaEngine` (shared) drives a headless CLI (`nebula-render`) and a live SwiftUI app (`NebulaApp`): 120fps `MTKView` loop, 8 sliders, presets, in-app Export (**16-bit PNG**, no banding), mipmapped faithful preview, before/after divider. Real star-layer stretch + native bilateral Denoise. Deferred by design: **tiled export** — not needed, a 1080×1920 frame renders whole in one pass (revisit only for mosaics / input-streaming); **exact published GHS** — a *look* change, folded into look-tuning (deferred to last per user). |
 | **2 · Native AI (CoreML)** | ⬜ Blocked on model weights (ONNX from GraXpert 1.0.1 / StarNet2 in hand as reference) |
-| **3 · Robust bake orchestrator** | ⬜ Not started |
-| **4 · SwiftUI app** | ⬜ Not started |
+| **3 · Robust bake orchestrator** | 🟡 Bake is driven from Swift via a durable wrapper (`prototype/nebula-bake.sh` + `prototype/aitools/`), but the seam is still the Python prototype — native Siril/manifest port not yet done. |
+| **4 · SwiftUI app** | 🟢 **Substantially done.** `NebulaApp` is now a photo-app, not a debug panel: **launch** (drop / choose a `…_subs` folder) → **baking** (live progress, streamed from the bake subprocess, per-target cached for instant re-open) → **editing** (the Phase-1 hero + 8 sliders + 16-bit Export) → Library to go back. A folder that's already a bake dir opens straight into the editor. Remaining: watch mode (Phase 5), look-tuning polish. |
 | **5 · Watch mode + DMG** | ⬜ Blocked on Apple Developer ID |
 
 ### Phase 0 real-AI recipe (dev-only tools, reproduced 2026-07-11)
@@ -87,7 +87,25 @@ swift build --product nebula-render --scratch-path /tmp/nebula-build
 /tmp/nebula-build/debug/nebula-render <bake_out_dir> vivid out.png
 # <bake_out_dir> = a bake dir with master/denoised/starless/stars .fits
 ```
-Engine = `Sources/NebulaRender/`. Same shaders will drive the live view + export.
+Engine = `Sources/NebulaRender/`. Same shaders drive the live view + 16-bit export.
+
+## Running the app (Phase 4)
+```bash
+swift build --product NebulaApp --scratch-path /tmp/nebula-build
+# Real-AI bake: point the wrappers at your tools (each step falls back to a
+# numerical stand-in if its var is unset, so the app always runs end-to-end):
+export GRAXPERT_BIN=/path/to/GraXpert.app/Contents/MacOS/GraXpert
+export STARNET_BIN=/path/to/StarNetBin/starnet2
+export STARNET_WEIGHTS=/path/to/StarNetBin/StarNet2_weights.pt
+/tmp/nebula-build/debug/NebulaApp            # launch screen: drop a "…_subs" folder
+/tmp/nebula-build/debug/NebulaApp <folder>   # or open a subs folder / bake dir directly
+```
+The app shells out to **`prototype/nebula-bake.sh`** (found via `NEBULA_BAKE` or by
+walking up from the CWD to the repo root). That script wires the durable,
+env-configured AI wrappers in **`prototype/aitools/`** (`gx_bg.sh`, `gx_denoise.sh`,
+`starnet_fits.py`) into `bake.py`. Bakes are cached at `~/Library/Caches/Nebula/<target>`
+so re-opening a target is instant. The bake driver lives in
+`Sources/NebulaApp/BakeRunner.swift` — the one file Phase 3 replaces.
 
 ## Immediate next steps
 1. **Phase 4 · the real app** — evolve `NebulaApp` from debug panel into the
