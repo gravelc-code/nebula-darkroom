@@ -53,10 +53,10 @@ struct Plane {
     }
 }
 
-private func medianOf(_ v: [Float]) -> Float {
+/// numpy `np.median` — averages the two middle elements for even counts.
+func medianOf(_ v: [Float]) -> Float {
     let s = v.sorted()
     let n = s.count
-    // Match numpy np.median: average the two middle elements for even counts.
     return n % 2 == 1 ? s[n / 2] : (s[n / 2 - 1] + s[n / 2]) / 2
 }
 
