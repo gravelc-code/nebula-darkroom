@@ -44,21 +44,6 @@ fragment float4 blitFragment(BlitOut in [[stage_in]],
     return float4(col, 1.0);
 }
 
-// "Before": the master with only the auto base stretch — the raw stack made
-// visible, for the before/after divider.
-kernel void stretchBefore(texture2d<float, access::read>  master [[texture(0)]],
-                          texture2d<float, access::write> outTex [[texture(1)]],
-                          constant Uniforms&              u      [[buffer(0)]],
-                          uint2 gid [[thread_position_in_grid]]) {
-    if (gid.x >= outTex.get_width() || gid.y >= outTex.get_height()) return;
-    float3 c = master.read(gid).rgb;
-    float3 shadow  = float3(u.shadow0, u.shadow1, u.shadow2);
-    float3 midtone = float3(u.midtone0, u.midtone1, u.midtone2);
-    c = clamp((c - shadow) / max(1.0 - shadow, 1e-4), 0.0, 1.0);
-    c = float3(mtfPivot(c.r, midtone.r), mtfPivot(c.g, midtone.g), mtfPivot(c.b, midtone.b));
-    outTex.write(float4(c, 1.0), gid);
-}
-
 struct Uniforms {
     float denoiseBlend;
     float blackPoint;
@@ -204,5 +189,21 @@ kernel void finish(texture2d<float, access::read>  nebula [[texture(0)]],
     float3 outc = 1.0 - (1.0 - neb) * (1.0 - clamp(stStr, 0.0, 1.0));
 
     outTex.write(float4(clamp(outc, 0.0, 1.0), 1.0), gid);
+}
+
+// "Before": the master with only the auto base stretch — the raw stack made
+// visible, for the before/after divider. Defined last so Uniforms/mtfPivot
+// (above) are in scope.
+kernel void stretchBefore(texture2d<float, access::read>  master [[texture(0)]],
+                          texture2d<float, access::write> outTex [[texture(1)]],
+                          constant Uniforms&              u      [[buffer(0)]],
+                          uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= outTex.get_width() || gid.y >= outTex.get_height()) return;
+    float3 c = master.read(gid).rgb;
+    float3 shadow  = float3(u.shadow0, u.shadow1, u.shadow2);
+    float3 midtone = float3(u.midtone0, u.midtone1, u.midtone2);
+    c = clamp((c - shadow) / max(1.0 - shadow, 1e-4), 0.0, 1.0);
+    c = float3(mtfPivot(c.r, midtone.r), mtfPivot(c.g, midtone.g), mtfPivot(c.b, midtone.b));
+    outTex.write(float4(c, 1.0), gid);
 }
 """;

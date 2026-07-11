@@ -16,8 +16,20 @@ private typealias Control = NebulaCore.Slider
 // Layers come from a bake dir: `swift run NebulaApp <layers_dir>` or the
 // NEBULA_LAYERS env var (a dir with master/denoised/starless/stars .fits).
 
+// An unbundled SwiftPM executable launched from a shell doesn't get a normal
+// app activation, so its window never draws. Force a regular activation policy
+// and bring it to the front on launch.
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+    func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { true }
+}
+
 @main
 struct NebulaApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @StateObject private var model = EngineModel()
     var body: some Scene {
         WindowGroup("Nebula") {
