@@ -17,7 +17,16 @@ let package = Package(
         // any UI (`swift run nebula-render <dir> <preset> <out.png>`).
         .executable(name: "nebula-render", targets: ["NebulaRender"]),
         // The interactive app: MTKView display-link loop + SwiftUI sliders.
-        .executable(name: "NebulaApp", targets: ["NebulaApp"])
+        .executable(name: "NebulaApp", targets: ["NebulaApp"]),
+        // Phase 2: native in-process AI (GraXpert models via onnxruntime),
+        // replacing the GraXpert subprocess. Probe proves ORT links from Swift.
+        .executable(name: "nebula-ai-probe", targets: ["NebulaAIProbe"])
+    ],
+    dependencies: [
+        // onnxruntime C/Obj-C runtime as a binary xcframework. Pinned to 1.19.2
+        // to match the Python spike that proved model parity (prototype/ai_native).
+        .package(url: "https://github.com/microsoft/onnxruntime-swift-package-manager",
+                 exact: "1.19.2")
     ],
     targets: [
         .target(
@@ -26,6 +35,18 @@ let package = Package(
         .target(
             name: "NebulaEngine",
             dependencies: ["NebulaCore"]
+        ),
+        .target(
+            name: "NebulaAI",
+            dependencies: [
+                "NebulaEngine",
+                .product(name: "onnxruntime",
+                         package: "onnxruntime-swift-package-manager")
+            ]
+        ),
+        .executableTarget(
+            name: "NebulaAIProbe",
+            dependencies: ["NebulaAI"]
         ),
         .executableTarget(
             name: "NebulaRender",
