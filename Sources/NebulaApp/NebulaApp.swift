@@ -1,4 +1,6 @@
 import SwiftUI
+import AppKit
+import UniformTypeIdentifiers
 import MetalKit
 import NebulaCore
 import NebulaEngine
@@ -65,6 +67,13 @@ final class EngineModel: ObservableObject {
 
     func apply(_ preset: Preset) { look = preset.look; activePreset = preset }
     func edited() { activePreset = Preset.matching(look) }
+
+    /// Export the current look to a full-res PNG via the SAME renderer as the
+    /// live preview, so what you see is exactly what you save.
+    func export(to url: URL) {
+        guard let renderer, let bundle else { return }
+        try? renderer.renderPNG(bundle: bundle, params: params, to: url)
+    }
 }
 
 struct ContentView: View {
@@ -99,6 +108,9 @@ struct ContentView: View {
                             .foregroundStyle(model.activePreset == p ? .white : .secondary)
                             .fontWeight(model.activePreset == p ? .semibold : .regular)
                     }
+                    Spacer()
+                    Button("Export…") { exportImage() }
+                        .buttonStyle(.borderless).foregroundStyle(.white)
                 }
                 ForEach(Control.headline, id: \.self) { sliderRow($0) }
                 DisclosureGroup("Advanced", isExpanded: $showAdvanced) {
@@ -111,6 +123,13 @@ struct ContentView: View {
             .frame(maxWidth: 460)
             .padding(.bottom, 24)
         }
+    }
+
+    private func exportImage() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.png]
+        panel.nameFieldStringValue = "Nebula.png"
+        if panel.runModal() == .OK, let url = panel.url { model.export(to: url) }
     }
 
     private func sliderRow(_ s: Control) -> some View {
