@@ -6,11 +6,13 @@ with a handful of plain-language sliders that respond instantly. It looks like a
 photo app, not a telescope tool.
 
 - **Platform:** macOS 14+, Apple Silicon
-- **Interactive core:** native Metal · **AI steps:** native CoreML · **Classical DSP:** bundled headless Siril
-- **UI:** SwiftUI · **Licence:** GPL-3.0 · **Install:** one signed DMG, drag to Applications, zero external dependencies
+- **Interactive core:** native Metal · **AI steps:** in-process onnxruntime (GraXpert models) · **Classical DSP:** bundled headless Siril
+- **UI:** SwiftUI · **Licence:** GPL-3.0 · **Install:** one DMG, drag to Applications, zero external dependencies (notarisation pending an Apple Developer ID)
 
-See [`seestar-autoprocess-design.md`](seestar-autoprocess-design.md) for the full technical design
-and [`seestar-ui-mockup.html`](seestar-ui-mockup.html) for the interactive UI mockup.
+**Working on this repo?** Start with [`CLAUDE.md`](CLAUDE.md) (module map, build/run,
+invariants, gotchas). See [`seestar-autoprocess-design.md`](seestar-autoprocess-design.md)
+for the full design, [`HANDOFF.md`](HANDOFF.md) for current status, and
+[`seestar-ui-mockup.html`](seestar-ui-mockup.html) for the UI mockup.
 
 ## Architecture — bake once, play forever
 
