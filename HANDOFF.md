@@ -11,7 +11,7 @@ plan lives outside the repo at `~/.claude/plans/have-a-look-at-floating-narwhal.
 |-------|--------|
 | **−1 · Scaffolding** | ✅ Done & tested |
 | **0 · Prove the bake** | ✅ **Acceptance met.** Proven end-to-end on real subs (M83, 67×30s) with real GraXpert (bg+denoise) + StarNet (separation); decisively beat the Seestar JPEG. Recipe below. |
-| **1 · Metal engine** | 🟡 **Kernel done.** Headless `NebulaRender` runs the Stage-B shader chain on real layers, driven by `EngineParams`; presets render distinct/correct. ⬜ Remaining: live `MTKView`/`CVDisplayLink` loop + SwiftUI slider panel (Xcode app target), tiled export, exact GHS. |
+| **1 · Metal engine** | 🟢 **Substantially done.** `NebulaEngine` (shared) drives a headless CLI (`nebula-render`) and a live SwiftUI app (`NebulaApp`): 120fps `MTKView` loop, 8 sliders, presets, in-app Export, mipmapped faithful preview, before/after divider. Real star-layer stretch + native bilateral Denoise. ⬜ Remaining (low priority): tiled export (not needed at 1080×1920), exact published GHS. |
 | **2 · Native AI (CoreML)** | ⬜ Blocked on model weights (ONNX from GraXpert 1.0.1 / StarNet2 in hand as reference) |
 | **3 · Robust bake orchestrator** | ⬜ Not started |
 | **4 · SwiftUI app** | ⬜ Not started |
@@ -90,11 +90,12 @@ swift build --product nebula-render --scratch-path /tmp/nebula-build
 Engine = `Sources/NebulaRender/`. Same shaders will drive the live view + export.
 
 ## Immediate next steps
-1. **Finish Phase 1** — create the Xcode app target; wrap the proven `NebulaRender`
-   engine in an `MTKView`/`CVDisplayLink` loop at 120 Hz with a SwiftUI debug
-   slider panel; add tiled full-res export; swap the asinh+MTF stretch for the
-   exact published GHS closed form.
-2. **Phase 2 · CoreML** — convert the in-hand GraXpert 1.0.1 / StarNet2 weights to
+1. **Phase 4 · the real app** — evolve `NebulaApp` from debug panel into the
+   photo-app hero UI (import a `_subs` folder → bake → open on the finished
+   image), watch mode, polish. Or finish Phase 1 tail (tiled export, exact GHS).
+2. **Phase 3 · robust bake orchestrator** — port the Python bake seam to Swift
+   (bundled/pinned Siril, typed manifest, fallbacks, health check, cancellation).
+3. **Phase 2 · CoreML** — convert the in-hand GraXpert 1.0.1 / StarNet2 weights to
    CoreML to drop the subprocess tools.
 
 ## Blocked-on-assets checklist
