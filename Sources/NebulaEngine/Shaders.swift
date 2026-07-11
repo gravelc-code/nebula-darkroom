@@ -28,7 +28,10 @@ vertex BlitOut blitVertex(uint vid [[vertex_id]]) {
 
 fragment float4 blitFragment(BlitOut in [[stage_in]],
                              texture2d<float> tex [[texture(0)]]) {
-    constexpr sampler s(filter::linear, address::clamp_to_edge);
+    // Trilinear: when the image is fit into a smaller window the hardware picks
+    // coarser mips, area-averaging so faint 1-pixel stars survive (dim, not
+    // gone) instead of aliasing away between texels.
+    constexpr sampler s(filter::linear, mip_filter::linear, address::clamp_to_edge);
     return float4(tex.sample(s, in.uv).rgb, 1.0);
 }
 

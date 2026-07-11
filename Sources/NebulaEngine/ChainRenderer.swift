@@ -161,9 +161,9 @@ public final class ChainRenderer {
         return t
     }
 
-    private func scratch(_ w: Int, _ h: Int) -> MTLTexture {
+    private func scratch(_ w: Int, _ h: Int, mipmapped: Bool = false) -> MTLTexture {
         let d = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .rgba32Float, width: w, height: h, mipmapped: false)
+            pixelFormat: .rgba32Float, width: w, height: h, mipmapped: mipmapped)
         d.usage = [.shaderRead, .shaderWrite]
         return device.makeTexture(descriptor: d)!
     }
@@ -174,7 +174,9 @@ public final class ChainRenderer {
         return LayerBundle(
             master: upload(master), denoised: upload(denoised),
             starless: upload(starless), stars: upload(stars),
-            nebTex: scratch(w, h), outTex: scratch(w, h),
+            // outTex is mipmapped so the fit-to-window preview downsamples
+            // faithfully (faint stars survive); the compute writes mip 0.
+            nebTex: scratch(w, h), outTex: scratch(w, h, mipmapped: true),
             width: w, height: h,
             auto: AutoStretch(base: starless), star: StarStretch(base: stars))
     }
@@ -208,6 +210,12 @@ public final class ChainRenderer {
               let rpd = view.currentRenderPassDescriptor else { return }
         let cmd = queue.makeCommandBuffer()!
         encodeChain(cmd, params, bundle)
+        // Rebuild mips so the trilinear blit downsamples faithfully to the window.
+        if bundle.outTex.mipmapLevelCount > 1 {
+            let blit = cmd.makeBlitCommandEncoder()!
+            blit.generateMipmaps(for: bundle.outTex)
+            blit.endEncoding()
+        }
         let enc = cmd.makeRenderCommandEncoder(descriptor: rpd)!
         enc.setRenderPipelineState(blitPipeline)
         enc.setFragmentTexture(bundle.outTex, index: 0)
