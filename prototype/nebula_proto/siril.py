@@ -106,10 +106,16 @@ def build_script(subs_dir: str, work_dir: str, precise_colour: bool,
         f"set core.mem_amount={mem_gb}",
         "setext fits",
         f"cd {_quote(subs_dir)}",
+        # Seestar is a one-shot-colour (OSC) camera: every sub is a raw Bayer CFA
+        # frame (header BAYERPAT=GRBG, NAXIS=2). `-debayer` demosaics on convert so
+        # the sequence — and the resulting master — is 3-channel colour. Without it
+        # the whole bake is monochrome and the colour stage has nothing to work on.
+        # `debayer.use_bayer_header=true` (Siril default) picks the pattern per-frame
+        # from the header, so this is correct regardless of the specific CFA layout.
         # NB: Siril 1.4's parser does NOT accept quotes on `-out=` (it takes the
         # quote literally). The work dir is app-controlled and space-free, so an
         # unquoted path is safe here.
-        f"convert light -out={process_dir}",
+        f"convert light -debayer -out={process_dir}",
         f"cd {_quote(process_dir)}",
         # Global star registration — tolerant of the Seestar's alt-az field rotation.
         "register light",
