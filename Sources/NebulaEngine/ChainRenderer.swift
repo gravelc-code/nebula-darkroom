@@ -267,6 +267,9 @@ public final class ChainRenderer {
         try writePNG(bundle.outTex, to: url)
     }
 
+    /// Write the float result as a 16-bit PNG (design §5: high-precision export,
+    /// no 8-bit banding). The RGBA32F values quantise to 16-bit cleanly, so no
+    /// dithering is needed — 16 bits has no visible banding in deep-sky gradients.
     private func writePNG(_ tex: MTLTexture, to url: URL) throws {
         let (w, h) = (tex.width, tex.height)
         var floats = [Float](repeating: 0, count: w * h * 4)
@@ -274,19 +277,25 @@ public final class ChainRenderer {
             tex.getBytes(raw.baseAddress!, bytesPerRow: w * 16,
                          from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
         }
-        var bytes = [UInt8](repeating: 255, count: w * h * 4)
+        var px = [UInt16](repeating: 0xFFFF, count: w * h * 4)
         for i in 0..<(w * h) {
-            for c in 0..<3 { bytes[i*4+c] = UInt8((max(0, min(1, floats[i*4+c])) * 255).rounded()) }
+            for c in 0..<3 {
+                px[i*4+c] = UInt16((max(0, min(1, floats[i*4+c])) * 65535).rounded())
+            }
         }
         let cs = CGColorSpace(name: CGColorSpace.sRGB)!
-        let ctx = CGContext(data: &bytes, width: w, height: h, bitsPerComponent: 8,
-                            bytesPerRow: w * 4, space: cs,
-                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        let info = CGImageAlphaInfo.premultipliedLast.rawValue
+                 | CGBitmapInfo.byteOrder16Little.rawValue
+        let ctx = px.withUnsafeMutableBytes { raw -> CGContext? in
+            CGContext(data: raw.baseAddress, width: w, height: h, bitsPerComponent: 16,
+                      bytesPerRow: w * 8, space: cs, bitmapInfo: info)
+        }
+        guard let ctx, let image = ctx.makeImage() else { throw Err.msg("CGContext failed") }
         guard let dest = CGImageDestinationCreateWithURL(
             url as CFURL, UTType.png.identifier as CFString, 1, nil) else {
             throw Err.msg("cannot create PNG at \(url.path)")
         }
-        CGImageDestinationAddImage(dest, ctx.makeImage()!, nil)
+        CGImageDestinationAddImage(dest, image, nil)
         guard CGImageDestinationFinalize(dest) else { throw Err.msg("PNG write failed") }
     }
 }

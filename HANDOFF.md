@@ -11,7 +11,7 @@ plan lives outside the repo at `~/.claude/plans/have-a-look-at-floating-narwhal.
 |-------|--------|
 | **−1 · Scaffolding** | ✅ Done & tested |
 | **0 · Prove the bake** | ✅ **Acceptance met.** Proven end-to-end on real subs (M83, 67×30s) with real GraXpert (bg+denoise) + StarNet (separation); decisively beat the Seestar JPEG. Recipe below. |
-| **1 · Metal engine** | 🟢 **Substantially done.** `NebulaEngine` (shared) drives a headless CLI (`nebula-render`) and a live SwiftUI app (`NebulaApp`): 120fps `MTKView` loop, 8 sliders, presets, in-app Export, mipmapped faithful preview, before/after divider. Real star-layer stretch + native bilateral Denoise. ⬜ Remaining (low priority): tiled export (not needed at 1080×1920), exact published GHS. |
+| **1 · Metal engine** | ✅ **Done.** `NebulaEngine` (shared) drives a headless CLI (`nebula-render`) and a live SwiftUI app (`NebulaApp`): 120fps `MTKView` loop, 8 sliders, presets, in-app Export (**16-bit PNG**, no banding), mipmapped faithful preview, before/after divider. Real star-layer stretch + native bilateral Denoise. Deferred by design: **tiled export** — not needed, a 1080×1920 frame renders whole in one pass (revisit only for mosaics / input-streaming); **exact published GHS** — a *look* change, folded into look-tuning (deferred to last per user). |
 | **2 · Native AI (CoreML)** | ⬜ Blocked on model weights (ONNX from GraXpert 1.0.1 / StarNet2 in hand as reference) |
 | **3 · Robust bake orchestrator** | ⬜ Not started |
 | **4 · SwiftUI app** | ⬜ Not started |
