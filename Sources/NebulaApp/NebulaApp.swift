@@ -225,10 +225,21 @@ final class EngineModel: ObservableObject {
     func edited() { activePreset = Preset.matching(look) }
 
     /// Export the current look to a full-res 16-bit PNG via the SAME renderer as
-    /// the live preview, so what you see is exactly what you save.
+    /// the live preview, so what you see is exactly what you save. Surfaces the
+    /// outcome so the editor can confirm success or show the failure.
+    @Published var lastSaved: URL?
+    @Published var exportError: String?
+
     func export(to url: URL) {
-        guard let renderer, let bundle else { return }
-        try? renderer.renderPNG(bundle: bundle, params: params, to: url)
+        guard let renderer, let bundle else {
+            exportError = "Nothing to export."; return
+        }
+        do {
+            try renderer.renderPNG(bundle: bundle, params: params, to: url)
+            lastSaved = url
+        } catch {
+            exportError = "\(error)"
+        }
     }
 }
 
@@ -463,7 +474,37 @@ struct EditorView: View {
                              contentMode: .fit)
                 .ignoresSafeArea()
                 controls
+                if let saved = model.lastSaved { savedToast(saved) }
             }
+        }
+        .alert("Export failed", isPresented: Binding(
+            get: { model.exportError != nil },
+            set: { if !$0 { model.exportError = nil } })
+        ) {
+            Button("OK", role: .cancel) { model.exportError = nil }
+        } message: { Text(model.exportError ?? "") }
+    }
+
+    /// Brief confirmation after a successful export; tap to reveal the file.
+    private func savedToast(_ url: URL) -> some View {
+        VStack {
+            Spacer()
+            Button {
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+            } label: {
+                Label("Saved \(url.lastPathComponent) — Show in Finder",
+                      systemImage: "checkmark.circle.fill")
+                    .font(.callout).foregroundStyle(.white)
+                    .padding(.horizontal, 14).padding(.vertical, 9)
+                    .background(.black.opacity(0.65), in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .padding(.bottom, 320)
+        }
+        .transition(.opacity)
+        .task(id: url) {
+            try? await Task.sleep(nanoseconds: 3_500_000_000)
+            if model.lastSaved == url { model.lastSaved = nil }
         }
     }
 
