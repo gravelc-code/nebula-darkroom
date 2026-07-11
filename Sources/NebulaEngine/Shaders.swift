@@ -83,14 +83,33 @@ kernel void processNebula(texture2d<float, access::read>  master   [[texture(0)]
                           uint2 gid [[thread_position_in_grid]]) {
     if (gid.x >= outNeb.get_width() || gid.y >= outNeb.get_height()) return;
 
-    float3 m  = master.read(gid).rgb;
-    float3 d  = denoised.read(gid).rgb;
     float3 sl = starless.read(gid).rgb;
 
-    // Denoise as a *blend*, never a destructive bake. A denoised starless is
-    // reconstructed from the layers: denoised - (master - starless).
-    float3 denoisedStarless = max(d - (m - sl), 0.0);
-    float3 neb = mix(sl, denoisedStarless, clamp(u.denoiseBlend, 0.0, 1.0));
+    // Denoise (interactive, native): an edge-preserving bilateral smooth of the
+    // starless nebula, blended by the slider. Stars are already separated out,
+    // so this only smooths background/nebula noise; the intensity-similarity
+    // weight preserves galaxy structure and star-forming knots. This is the
+    // real control — the bake's GraXpert denoise layer was a near no-op here.
+    float db = clamp(u.denoiseBlend, 0.0, 1.0);
+    float3 neb = sl;
+    if (db > 0.001) {
+        const int R = 2;
+        int W = int(starless.get_width()), H = int(starless.get_height());
+        float inv2s2 = 1.0 / (2.0 * 0.008 * 0.008);   // intensity similarity
+        float3 acc = 0.0; float wsum = 0.0;
+        for (int dy = -R; dy <= R; ++dy) {
+            for (int dx = -R; dx <= R; ++dx) {
+                uint2 p = uint2(clamp(int(gid.x) + dx, 0, W - 1),
+                                clamp(int(gid.y) + dy, 0, H - 1));
+                float3 s = starless.read(p).rgb;
+                float3 diff = s - sl;
+                float w = exp(-dot(diff, diff) * inv2s2)      // range weight
+                        * exp(-float(dx*dx + dy*dy) / 8.0);   // spatial weight
+                acc += s * w; wsum += w;
+            }
+        }
+        neb = mix(sl, acc / max(wsum, 1e-6), db);
+    }
 
     // Auto base stretch: per-channel black point + MTF midtone (linear->display).
     float3 shadow  = float3(u.shadow0, u.shadow1, u.shadow2);
