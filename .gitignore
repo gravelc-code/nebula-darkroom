@@ -10,15 +10,9 @@ DerivedData/
 *.xcodeproj/project.xcworkspace/xcuserdata/
 xcuserdata/
 
-# Swift Package Manager
+# Swift Package Manager (Package.resolved IS committed — reproducible builds)
 .build/
 .swiftpm/
-Package.resolved
-
-# Bundled engine artifacts (fetched/built, not committed — see NOTICES)
-Vendor/siril/
-Vendor/models/*.mlpackage
-Vendor/index/
 
 # Phase 0 prototyping scratch
 prototype/out/
