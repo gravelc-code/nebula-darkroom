@@ -31,7 +31,7 @@ Data flows top-to-bottom. Deps point downward.
 
 | Target | Kind | Role |
 |--------|------|------|
-| `NebulaCore` | lib | Pure, tested, no deps. The `LookState` (~8 normalized floats), `Slider`/`Preset`/`Profile`, `EngineParams` (slider→shader mapping), `Target`, and the `Manifest` bake↔play contract. **Single source of truth** shared by engine, bake, UI. |
+| `NebulaCore` | lib | Pure, tested, no deps. The `LookState` (10 normalized floats), `Slider`/`Profile`, `EngineParams` (slider→shader mapping), `Target`, and the `Manifest` bake↔play contract. **Single source of truth** shared by engine, bake, UI. `LookState.neutral` (truthful "before") + `LookState.default` (the developed opening look) replace the old preset system. |
 | `NebulaEngine` | lib | The Metal "Stage-B" engine: `ChainRenderer` (shader chain → live `MTKView` + 16-bit PNG), `Shaders.swift` (GHS stretch etc.), `FITSImage` (narrow float-FITS read/**write** + HWC helpers). |
 | `NebulaAI` | lib | In-process AI via onnxruntime (`onnxruntime` SPM pkg, imported as `OnnxRuntimeBindings`). `OrtModel` (persistent session), `Denoiser` + `BgExtractor` — faithful Swift ports of GraXpert's pipelines, validated bit-exact/visually-identical against the Python spikes. |
 | `NebulaBake` | lib | The **native bake orchestrator** (replaces Python `bake.py`). `SirilStage` selects one compatible filter group, then registers/stacks and attempts PCC; `Baker` runs in-process background removal + denoise and emits 4 layers + `Manifest`. A pluggable StarNet hook (`NEBULA_STARNET`) is preferred; otherwise a feathered classical star mask keeps star controls functional. |
@@ -74,10 +74,10 @@ Launch env hooks (useful for headless testing): `NEBULA_WATCH=<dir>` (start watc
 mode), `NEBULA_LAYERS=<bakeDir>` (open straight into editor).
 
 ## Invariants — don't break these
-- **`LookState` is ~8 normalized floats** and the single source of truth; the slider→shader mapping is `EngineParams` (design §6 table). Saved in the manifest, shareable as a preset.
+- **`LookState` is 10 normalized floats** and the single source of truth; the slider→shader mapping is `EngineParams` (design §6 table). Saved in the manifest, shareable. There are no user-facing presets — targets open on `LookState.default` and a Reset restores it.
 - **Preview == export**: both go through `ChainRenderer.encodeChain`. Any look change must be in the shader chain, not a one-off.
 - **No Python in the shipping build.** `prototype/` is reference only; `NebulaBake` is what ships.
-- **No jargon in UI strings** (there's a test for this): the user sees Glow/Colour/Stars/Contrast/Background/Detail/Star Size/Denoise, never "GHS"/"SPCC"/"starless".
+- **No jargon in UI strings** (there's a test for this): the user sees Glow/Saturation/Vibrance/Tint/Stars/Contrast/Background/Detail/Star Size/Denoise, never "GHS"/"SPCC"/"starless".
 - **Star Size is bidirectional**: 50 = the captured profiles bit-exactly; below erodes the real star flux (star reduction), above blooms. Don't reintroduce always-on bloom.
 - **GraXpert models and StarNet are never bundled or auto-downloaded** (licence terms; even Siril requires a GraXpert install to get the models — their S3 credentials are private).
 

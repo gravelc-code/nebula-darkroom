@@ -12,8 +12,9 @@ import Foundation
 /// lerp(starless, denoisedStarless, denoiseBlend) + starFlux·starWeight
 ///   → blackPoint(blackPoint)
 ///   → ghs(D: glowD, SP: contrastSP)
-///   → saturateMidtones(saturation)
-///   → bilateral(smoothStrength) → localContrast(detailStrength)
+///   → saturation → vibrance → tint(green↔magenta)
+///   → bilateral(smoothStrength)
+///   → localContrast(detailStrength) + structureBoost(structureStrength)
 ///   → screen(image, starLayerBloom(starD) · starWeight)   // Star Size only
 /// ```
 /// Star presence is linear in the real star flux, so Stars=1 reconstructs the
@@ -35,10 +36,23 @@ public struct EngineParams: Equatable, Sendable {
     public var glowD: Float
     /// GHS symmetry point (SP) — the pivot around which contrast pivots.
     public var contrastSP: Float
-    /// Local-contrast (unsharp on starless) strength.
+    /// Small-radius local contrast (unsharp on starless) — micro-detail "bite".
     public var detailStrength: Float
-    /// Midtone saturation multiplier; background stays neutral.
+    /// Large-radius local contrast on the starless layer — the multi-scale
+    /// structure boost that gives nebulosity depth and "pop". Sampled from coarse
+    /// mip levels of the nebula so it swells real structure without amplifying
+    /// grain; recombined chroma-preserving so colour is retained, and applied to
+    /// the starless nebula only so stars never bloat or halo.
+    public var structureStrength: Float
+    /// Uniform midtone saturation multiplier (`1` = unchanged, `0` = greyscale);
+    /// background stays neutral.
     public var saturation: Float
+    /// Vibrance multiplier — a chroma-protected boost applied after saturation, so
+    /// pale nebulosity enriches while already-saturated cores are held back.
+    public var vibrance: Float
+    /// Green↔magenta tint, `0.5` neutral. Below suppresses green harder (toward
+    /// magenta); above restores and adds green. Drives the SCNR green balance.
+    public var tint: Float
     /// Star layer presence in the final screen recombine.
     public var starWeight: Float
     /// GHS strength (D) applied to the star layer — controls apparent star size.
@@ -53,7 +67,8 @@ public struct EngineParams: Equatable, Sendable {
     /// destructive directions (Detail, Denoise) dial *down* by default.
     public init(_ look: LookState) {
         let glow       = Float(look[.glow])
-        let colour     = Float(look[.colour])
+        let sat        = Float(look[.saturation])
+        let vib        = Float(look[.vibrance])
         let stars      = Float(look[.stars])
         let contrast   = Float(look[.contrast])
         let background = Float(look[.background])
@@ -80,13 +95,23 @@ public struct EngineParams: Equatable, Sendable {
         // Wide range so the top end crushes shadows into properly deep blacks.
         contrastSP = 0.4 + contrast * 1.2
 
-        // Detail is local contrast; conservative ceiling so it can't overcook.
-        detailStrength = detail * 0.9
+        // Detail now drives a *multi-scale* local contrast. The small-radius band
+        // (bite) stays conservative so it can't crunch into noise, while the
+        // large-radius structure band carries the visible "pop" — it swells real
+        // nebula structure. Structure ramps quadratically so the bottom of the
+        // slider stays gentle and the top has genuine authority; the shader clamps
+        // the recovered signal, so this is a strength, not an unbounded gain.
+        detailStrength = detail * 0.7
+        structureStrength = detail * detail * 1.6
 
-        // Centre the control on truthful colour instead of making 0.5 arbitrary.
-        // The shader applies boosts vibrance-style (chroma-protected), so the
-        // wide top end enriches pale nebulosity without clipping strong colour.
-        saturation = 0.2 + colour * 1.6
+        // Colour is three independent controls, all neutral at the 0.5 midpoint.
+        // Saturation is a uniform chroma scale: 0 → greyscale, 0.5 → truthful,
+        // 1 → 2× for bold colour. Vibrance is a chroma-protected boost centred on
+        // 1 (so it can also gently drain). Tint (green↔magenta) passes through as
+        // a normalised value; the shader derives the green balance from it.
+        saturation = sat * 2.0
+        vibrance = 1.0 + (vib - 0.5) * 1.6
+        tint = Float(look[.tint])
 
         // Stars recombine weight; Star Size is bidirectional around a neutral
         // midpoint: below 50 tightens the real star flux (shrink), above 50

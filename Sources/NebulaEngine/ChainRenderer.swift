@@ -18,7 +18,10 @@ public struct EngineParamsGPU {
     var glowD: Float
     var contrastSP: Float
     var detailStrength: Float
+    var structureStrength: Float
     var saturation: Float
+    var vibrance: Float
+    var tint: Float
     var starWeight: Float
     var starD: Float
     var starShrink: Float
@@ -32,7 +35,8 @@ public struct EngineParamsGPU {
         correctionBlend = p.correctionBlend
         blackPoint = p.blackPoint
         glowD = p.glowD; contrastSP = p.contrastSP
-        detailStrength = p.detailStrength; saturation = p.saturation
+        detailStrength = p.detailStrength; structureStrength = p.structureStrength
+        saturation = p.saturation; vibrance = p.vibrance; tint = p.tint
         starWeight = p.starWeight; starD = p.starD; starShrink = p.starShrink
         shadow0 = a.shadow.0; shadow1 = a.shadow.1; shadow2 = a.shadow.2
         midtone0 = a.midtone.0; midtone1 = a.midtone.1; midtone2 = a.midtone.2
@@ -292,7 +296,7 @@ public final class ChainRenderer: @unchecked Sendable {
             master: masterTex, corrected: upload(corrected),
             denoised: upload(denoised),
             starless: upload(starless), stars: upload(stars),
-            nebTex: scratch(w, h), outTex: scratch(w, h, mipmapped: true),
+            nebTex: scratch(w, h, mipmapped: true), outTex: scratch(w, h, mipmapped: true),
             beforeTex: scratch(w, h, mipmapped: true),
             width: w, height: h, auto: auto, star: star)
         renderBefore(bundle)
@@ -301,7 +305,7 @@ public final class ChainRenderer: @unchecked Sendable {
 
     /// Render the static "before" (raw stack, auto-stretched) once.
     private func renderBefore(_ b: LayerBundle) {
-        var u = EngineParamsGPU(Preset.auto.look.engineParams, auto: b.auto, star: b.star)
+        var u = EngineParamsGPU(LookState.neutral.engineParams, auto: b.auto, star: b.star)
         let tpg = MTLSize(width: 16, height: 16, depth: 1)
         let grid = MTLSize(width: (b.width + 15) / 16, height: (b.height + 15) / 16, depth: 1)
         let cmd = queue.makeCommandBuffer()!
@@ -330,6 +334,13 @@ public final class ChainRenderer: @unchecked Sendable {
         e1.setBytes(&u, length: MemoryLayout<EngineParamsGPU>.stride, index: 0)
         e1.dispatchThreadgroups(grid, threadsPerThreadgroup: tpg)
         e1.endEncoding()
+
+        // Build the nebula's mip chain so `finish` can read coarse (tens-of-pixel)
+        // blur levels for the large-scale structure boost without a huge inline
+        // gather. Apple-Silicon filters rgba32Float, so linear mip sampling is exact.
+        let mipEnc = cmd.makeBlitCommandEncoder()!
+        mipEnc.generateMipmaps(for: b.nebTex)
+        mipEnc.endEncoding()
 
         let e2 = cmd.makeComputeCommandEncoder()!
         e2.setComputePipelineState(finishPipeline)

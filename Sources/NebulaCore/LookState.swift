@@ -40,6 +40,30 @@ public struct LookState: Codable, Equatable, Sendable {
     }
 }
 
+// MARK: - Canonical looks
+
+extension LookState {
+    /// The truthful baseline: only the robust statistical linear→display stretch
+    /// is active, every creative and destructive stage off. This is the "before"
+    /// reference (the raw stack made visible) — it must never alter real pixels.
+    /// Colour is neutral (Saturation/Vibrance at the midpoint, Tint neutral).
+    public static var neutral: LookState {
+        LookState(percent: [.glow: 0, .saturation: 50, .vibrance: 50, .tint: 50,
+                            .stars: 100, .contrast: 50, .background: 0,
+                            .detail: 0, .starSize: 50, .denoise: 0])
+    }
+
+    /// The look a freshly baked target opens on — a pleasant, finished starting
+    /// point ("one tap → a developed image") that the user then refines. Lifts
+    /// faint signal (Glow), cleans the background, enriches colour, and brings in
+    /// the multi-scale structure boost (Detail) so nebulosity has depth on open.
+    public static var `default`: LookState {
+        LookState(percent: [.glow: 50, .saturation: 58, .vibrance: 60, .tint: 50,
+                            .stars: 62, .contrast: 56, .background: 66,
+                            .detail: 52, .starSize: 45, .denoise: 60])
+    }
+}
+
 extension Double {
     /// Clamp to the closed unit interval.
     var clamped01: Double { Swift.min(1, Swift.max(0, self)) }

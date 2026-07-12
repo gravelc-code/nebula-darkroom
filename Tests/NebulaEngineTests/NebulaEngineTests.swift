@@ -70,7 +70,7 @@ final class NebulaEngineTests: XCTestCase {
         let bundle = renderer.makeBundle(master: master, corrected: master,
                                          denoised: denoised, starless: starless, stars: stars)
 
-        var look = Preset.auto.look                                  // background = 0
+        var look = LookState.neutral                                  // background = 0
         let base = try renderer.renderImage(bundle: bundle, params: look.engineParams)
 
         look[.denoise] = 1
@@ -78,7 +78,7 @@ final class NebulaEngineTests: XCTestCase {
         let denoiseDiff = zip(base.rgba, denoisedOut.rgba).map { abs($0 - $1) }.max() ?? 0
         XCTAssertGreaterThan(denoiseDiff, 0.005, "Denoise slider is dead at Background=0")
 
-        look = Preset.auto.look
+        look = LookState.neutral
         look[.stars] = 0
         let noStars = try renderer.renderImage(bundle: bundle, params: look.engineParams)
         let core = (32*w+32)*4
@@ -116,7 +116,7 @@ final class NebulaEngineTests: XCTestCase {
             let p = (y*w+x)*4
             return img.rgba[p]*0.2126 + img.rgba[p+1]*0.7152 + img.rgba[p+2]*0.0722
         }
-        var look = Preset.auto.look                       // starSize = 50: natural
+        var look = LookState.neutral                       // starSize = 50: natural
         let natural = try renderer.renderImage(bundle: bundle, params: look.engineParams)
         look[.starSize] = 0.2
         let tightened = try renderer.renderImage(bundle: bundle, params: look.engineParams)
@@ -133,6 +133,53 @@ final class NebulaEngineTests: XCTestCase {
         // Star-free background is untouched by either direction.
         XCTAssertEqual(lum(tightened, 5, 5), lum(natural, 5, 5), accuracy: 2e-3)
         XCTAssertEqual(lum(bloomed, 5, 5), lum(natural, 5, 5), accuracy: 2e-3)
+    }
+
+    /// Detail's large-scale structure boost is multi-scale local contrast: a
+    /// broad nebula swell (wider than the small box gathers) must gain contrast
+    /// against its surround when Detail rises — that swell is the visible "pop".
+    func testDetailStructureBoostRaisesLargeScaleContrast() throws {
+        let renderer: ChainRenderer
+        do { renderer = try ChainRenderer() } catch { throw XCTSkip("no Metal device") }
+
+        let w = 96, h = 96
+        func image(_ fill: (Int, Int) -> Float) -> FITSImage {
+            var rgba = [Float](repeating: 1, count: w*h*4)
+            for y in 0..<h { for x in 0..<w {
+                let v = fill(x, y)
+                let p = (y*w+x)*4; rgba[p] = v; rgba[p+1] = v; rgba[p+2] = v
+            } }
+            return FITSImage(width: w, height: h, channels: 3, rgba: rgba)
+        }
+        // A broad, smooth nebula blob (σ≈14 px) — larger than the ±4 px box
+        // gathers, so only the coarse mip bands (structure) can see it.
+        func blob(_ x: Int, _ y: Int) -> Float {
+            let d = Float((x-48)*(x-48) + (y-48)*(y-48))
+            return 0.45 * exp(-d/380)
+        }
+        let neb   = image { x, y in 0.04 + blob(x, y) }
+        let stars = image { _, _ in 0.0 }
+        let bundle = renderer.makeBundle(master: neb, corrected: neb,
+                                         denoised: neb, starless: neb, stars: stars)
+
+        func lum(_ img: FITSImage, _ x: Int, _ y: Int) -> Float {
+            let p = (y*w+x)*4
+            return img.rgba[p]*0.2126 + img.rgba[p+1]*0.7152 + img.rgba[p+2]*0.0722
+        }
+        var look = LookState.neutral          // detail = 0: structure boost off
+        look[.detail] = 0
+        let flat = try renderer.renderImage(bundle: bundle, params: look.engineParams)
+        look[.detail] = 1                    // full multi-scale structure
+        let popped = try renderer.renderImage(bundle: bundle, params: look.engineParams)
+
+        // Contrast = blob core minus a point out on its skirt (r≈20 px). The boost
+        // must widen that gap; the swell is what reads as depth.
+        let flatContrast = lum(flat, 48, 48) - lum(flat, 68, 48)
+        let popContrast  = lum(popped, 48, 48) - lum(popped, 68, 48)
+        XCTAssertGreaterThan(popContrast, flatContrast + 0.01,
+                             "structure boost did not deepen large-scale contrast")
+        // The core (above its coarse surround) genuinely brightens — it pops.
+        XCTAssertGreaterThan(lum(popped, 48, 48), lum(flat, 48, 48) + 1e-3)
     }
 
     func testAutoCropFindsACompactCentralTarget() {

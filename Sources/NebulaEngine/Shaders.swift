@@ -60,7 +60,10 @@ struct Uniforms {
     float glowD;
     float contrastSP;
     float detailStrength;
+    float structureStrength;
     float saturation;
+    float vibrance;
+    float tint;
     float starWeight;
     float starD;
     float starShrink;
@@ -237,33 +240,48 @@ kernel void processNebula(texture2d<float, access::read>  master   [[texture(0)]
     shaped = contrastCurve(shaped, u.contrastSP);
     neb = withLuminance(neb, lum, shaped);
 
-    // Midtone saturation, luminance-weighted so the background stays neutral.
-    // The weight uses the PRE-contrast tone as well: a strong contrast curve
-    // darkens the nebula body, and weighting on the darkened value alone would
-    // drain its colour exactly when the user asks for punch.
+    // Colour is three independent controls, all luminance-weighted so the
+    // background stays neutral (no colour lifted out of noise). The weight uses
+    // the PRE-contrast tone as well: a strong contrast curve darkens the nebula
+    // body, and weighting on the darkened value alone would drain its colour
+    // exactly when the user asks for punch.
     lum = luminance(neb);
     float w = smoothstep(0.015, 0.18, max(lum, preContrast));
-    float sat = mix(1.0, u.saturation, w);
-    // Vibrance-style boost: already-colourful pixels take less of it, so a
-    // strong Colour setting enriches pale nebulosity without pushing saturated
-    // cores into clipped neon.
-    if (sat > 1.0) {
+
+    // Saturation: a uniform chroma scale toward/away from grey.
+    float satF = mix(1.0, u.saturation, w);
+    neb = max(lum + (neb - lum) * satF, 0.0);
+
+    // Vibrance: a chroma-protected boost applied on top. Already-colourful pixels
+    // take less of it, so pale nebulosity enriches without pushing saturated
+    // cores into clipped neon; below 1 it gently drains the most saturated first.
+    lum = luminance(neb);
+    float vibF = mix(1.0, u.vibrance, w);
+    {
         float mx = max(neb.r, max(neb.g, neb.b));
         float mn = min(neb.r, min(neb.g, neb.b));
         float chroma = (mx - mn) / max(mx, 1e-4);
-        sat = 1.0 + (sat - 1.0) * (1.0 - 0.75 * smoothstep(0.45, 0.95, chroma));
+        float protect = 1.0 - 0.75 * smoothstep(0.45, 0.95, chroma);
+        vibF = 1.0 + (vibF - 1.0) * protect;
     }
-    neb = lum + (neb - lum) * sat;
-    // SCNR-style green suppression: broadband deep sky has no lone-green
-    // emitters, so green above both red and blue is a stacking/gradient cast.
-    // Cyan (OIII, green+blue) survives because the blue channel carries it.
-    neb.g = mix(neb.g, min(neb.g, max(neb.r, neb.b)), 0.8);
+    lum = luminance(neb);
+    neb = max(lum + (neb - lum) * vibF, 0.0);
+
+    // Tint: green↔magenta balance. Neutral (0.5) keeps a moderate SCNR-style green
+    // suppression — broadband deep sky has no lone-green emitters, so green above
+    // both red and blue is a stacking/gradient cast; cyan (OIII, green+blue)
+    // survives via the blue channel. Toward magenta (tint<0.5) suppresses green
+    // harder; toward green (tint>0.5) restores and then adds green.
+    float tg = (u.tint - 0.5) * 2.0;                    // -1 magenta .. +1 green
+    float scnr = clamp(0.7 - tg, 0.0, 1.0);
+    neb.g = mix(neb.g, min(neb.g, max(neb.r, neb.b)), scnr);
+    if (tg > 0.0) neb.g = neb.g * (1.0 + tg * 0.35);
     neb = protectHighlights(neb);
 
     outNeb.write(float4(neb, 1.0), gid);
 }
 
-kernel void finish(texture2d<float, access::read>  nebula [[texture(0)]],
+kernel void finish(texture2d<float, access::sample> nebula [[texture(0)]],
                    texture2d<float, access::read>  stars  [[texture(1)]],
                    texture2d<float, access::write> outTex [[texture(2)]],
                    constant Uniforms&              u      [[buffer(0)]],
@@ -314,7 +332,21 @@ kernel void finish(texture2d<float, access::read>  nebula [[texture(0)]],
     // away at the end of the slider.
     float recovered = 0.65 * (lum - fineLum) + 0.35 * (lum - blurLum);
     recovered = clamp(recovered, -0.08, 0.08);
-    float detailedLum = max(lum + recovered * u.detailStrength, 0.0);
+    // Large-scale structure "pop": local contrast against coarse mip levels of
+    // the nebula — tens of pixels of blur that the small box gathers can't reach.
+    // Two mip taps give a mid- and large-scale band so structure swells at more
+    // than one size; the wide clamp lets it carry real depth while still bounding
+    // runaway gain. Applied chroma-preserving (via withLuminance) on the starless
+    // nebula only, so it deepens structure without shifting hue or bloating stars.
+    float2 uv = (float2(gid) + 0.5) / float2(W, H);
+    constexpr sampler mip(coord::normalized, address::clamp_to_edge,
+                          filter::linear, mip_filter::linear);
+    float midLum   = luminance(nebula.sample(mip, uv, level(3.5)).rgb);
+    float largeLum = luminance(nebula.sample(mip, uv, level(5.5)).rgb);
+    float structure = 0.55 * (lum - midLum) + 0.45 * (lum - largeLum);
+    structure = clamp(structure, -0.22, 0.22);
+    float detailedLum = max(lum + recovered * u.detailStrength
+                                 + structure * u.structureStrength, 0.0);
     neb = protectHighlights(withLuminance(neb, lum, detailedLum));
 
     // Star Size bloom ONLY: star presence is already in the image linearly.

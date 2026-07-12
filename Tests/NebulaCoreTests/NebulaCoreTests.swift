@@ -5,10 +5,10 @@ import XCTest
 
 final class SliderTests: XCTestCase {
     func testHeadlineAndAdvancedSplit() {
-        XCTAssertEqual(Slider.headline, [.glow, .colour, .stars])
+        XCTAssertEqual(Slider.headline, [.glow, .saturation, .vibrance, .tint, .stars])
         XCTAssertEqual(Set(Slider.advanced),
                        [.contrast, .background, .detail, .starSize, .denoise])
-        XCTAssertEqual(Slider.allCases.count, 8)
+        XCTAssertEqual(Slider.allCases.count, 10)
     }
 
     func testActsOnMapping() {
@@ -33,9 +33,9 @@ final class LookStateTests: XCTestCase {
     func testClampsToUnitInterval() {
         var look = LookState()
         look[.glow] = 5.0
-        look[.colour] = -2.0
+        look[.saturation] = -2.0
         XCTAssertEqual(look[.glow], 1.0)
-        XCTAssertEqual(look[.colour], 0.0)
+        XCTAssertEqual(look[.saturation], 0.0)
     }
 
     func testPercentInitAndReadback() {
@@ -47,7 +47,7 @@ final class LookStateTests: XCTestCase {
     }
 
     func testCodableRoundTripIsFlatAndStable() throws {
-        let look = Preset.vivid.look
+        let look = LookState.default
         let data = try JSONEncoder().encode(look)
         let json = String(decoding: data, as: UTF8.self)
         // Encoded as a flat object keyed by slider raw values.
@@ -57,23 +57,31 @@ final class LookStateTests: XCTestCase {
     }
 }
 
-final class PresetTests: XCTestCase {
-    func testAutoIsAConservativeMasterFirstBaseline() {
-        let auto = Preset.auto.look
-        XCTAssertEqual(auto.percent(.glow), 0)
-        XCTAssertEqual(auto.percent(.colour), 50)
-        XCTAssertEqual(auto.percent(.stars), 100)
-        XCTAssertEqual(auto.percent(.background), 0)
-        XCTAssertEqual(auto.percent(.detail), 0)
-        XCTAssertEqual(auto.percent(.starSize), 50)   // bidirectional: 50 = natural
-        XCTAssertEqual(auto.percent(.denoise), 0)
+final class CanonicalLookTests: XCTestCase {
+    func testNeutralIsATruthfulMasterFirstBaseline() {
+        let n = LookState.neutral
+        XCTAssertEqual(n.percent(.glow), 0)
+        XCTAssertEqual(n.percent(.saturation), 50)     // colour trio all neutral
+        XCTAssertEqual(n.percent(.vibrance), 50)
+        XCTAssertEqual(n.percent(.tint), 50)
+        XCTAssertEqual(n.percent(.stars), 100)
+        XCTAssertEqual(n.percent(.background), 0)
+        XCTAssertEqual(n.percent(.detail), 0)
+        XCTAssertEqual(n.percent(.starSize), 50)       // bidirectional: 50 = natural
+        XCTAssertEqual(n.percent(.denoise), 0)
     }
 
-    func testMatchingIdentifiesPreset() {
-        XCTAssertEqual(Preset.matching(Preset.deep.look), .deep)
-        var edited = Preset.deep.look
-        edited[.glow] = edited[.glow] + 0.01
-        XCTAssertNil(Preset.matching(edited))
+    func testDefaultIsADevelopedStartingLook() {
+        let d = LookState.default
+        // The one-tap opening look must actually develop the image: faint signal
+        // lifted, structure boosted, colour enriched — not the truthful baseline.
+        XCTAssertGreaterThan(d[.glow], 0.2)
+        XCTAssertGreaterThan(d[.detail], 0.2)
+        XCTAssertGreaterThan(d[.saturation], 0.5)
+        XCTAssertGreaterThan(d[.background], 0.2)
+        XCTAssertNotEqual(d, LookState.neutral)
+        // Every value stays in range.
+        for slider in Slider.allCases { XCTAssert((0...1).contains(d[slider])) }
     }
 }
 
@@ -102,7 +110,9 @@ final class EngineParamsTests: XCTestCase {
     func testNeutralLookIsConservative() {
         let p = LookState().engineParams   // all sliders at 0.5
         XCTAssertEqual(p.denoiseBlend, 0.5, accuracy: 1e-6)
-        XCTAssertEqual(p.saturation, 1.0, accuracy: 1e-6)
+        XCTAssertEqual(p.saturation, 1.0, accuracy: 1e-6)   // 0.5 → truthful colour
+        XCTAssertEqual(p.vibrance, 1.0, accuracy: 1e-6)
+        XCTAssertEqual(p.tint, 0.5, accuracy: 1e-6)         // green↔magenta neutral
         XCTAssertEqual(p.glowD, 1.75, accuracy: 1e-6)
         XCTAssertEqual(p.blackPoint, 0, accuracy: 1e-6)
         XCTAssertEqual(p.starWeight, 0.5, accuracy: 1e-6)
@@ -110,15 +120,18 @@ final class EngineParamsTests: XCTestCase {
         XCTAssertEqual(p.starShrink, 0, accuracy: 1e-6)  // …and no shrink — stars as captured
     }
 
-    func testAutoDisablesCreativeAndDestructiveStages() {
-        let p = Preset.auto.look.engineParams
+    func testNeutralDisablesCreativeAndDestructiveStages() {
+        let p = LookState.neutral.engineParams
         XCTAssertEqual(p.denoiseBlend, 0, accuracy: 1e-6)
         XCTAssertEqual(p.smoothStrength, 0, accuracy: 1e-6)
         XCTAssertEqual(p.correctionBlend, 0, accuracy: 1e-6)
         XCTAssertEqual(p.glowD, 0, accuracy: 1e-6)
         XCTAssertEqual(p.detailStrength, 0, accuracy: 1e-6)
+        XCTAssertEqual(p.structureStrength, 0, accuracy: 1e-6)
         XCTAssertEqual(p.blackPoint, 0, accuracy: 1e-6)
         XCTAssertEqual(p.saturation, 1, accuracy: 1e-6)
+        XCTAssertEqual(p.vibrance, 1, accuracy: 1e-6)
+        XCTAssertEqual(p.tint, 0.5, accuracy: 1e-6)
         XCTAssertEqual(p.starWeight, 1, accuracy: 1e-6)
         XCTAssertEqual(p.starD, 0, accuracy: 1e-6)
         XCTAssertEqual(p.starShrink, 0, accuracy: 1e-6)
@@ -136,10 +149,31 @@ final class EngineParamsTests: XCTestCase {
         XCTAssertEqual(look.engineParams.starD, 0.9, accuracy: 1e-6)
     }
 
+    func testDetailDrivesMultiScaleStructure() {
+        var look = LookState()
+        // Detail off: neither the small-radius bite nor the large-scale pop.
+        look[.detail] = 0
+        XCTAssertEqual(look.engineParams.detailStrength, 0, accuracy: 1e-6)
+        XCTAssertEqual(look.engineParams.structureStrength, 0, accuracy: 1e-6)
+        // Structure ramps quadratically, so the bottom half stays gentle relative
+        // to its top — half detail is a quarter of the full structure strength.
+        look[.detail] = 0.5
+        XCTAssertEqual(look.engineParams.detailStrength, 0.35, accuracy: 1e-6)
+        XCTAssertEqual(look.engineParams.structureStrength, 0.4, accuracy: 1e-6)
+        // Full detail: bite capped low, structure carries the visible authority.
+        look[.detail] = 1
+        XCTAssertEqual(look.engineParams.detailStrength, 0.7, accuracy: 1e-6)
+        XCTAssertEqual(look.engineParams.structureStrength, 1.6, accuracy: 1e-6)
+    }
+
     func testExtremesStayBounded() {
         let maxLook = LookState(Dictionary(uniqueKeysWithValues: Slider.allCases.map { ($0, 1.0) }))
         let p = maxLook.engineParams
-        XCTAssertEqual(p.saturation, 1.8, accuracy: 1e-6)
+        XCTAssertEqual(p.saturation, 2.0, accuracy: 1e-6)
+        XCTAssertEqual(p.vibrance, 1.8, accuracy: 1e-6)
+        XCTAssertEqual(p.tint, 1.0, accuracy: 1e-6)
+        XCTAssertEqual(p.detailStrength, 0.7, accuracy: 1e-6)
+        XCTAssertEqual(p.structureStrength, 1.6, accuracy: 1e-6)
         XCTAssertEqual(p.glowD, 3.5, accuracy: 1e-6)
         XCTAssertEqual(p.blackPoint, 0.06, accuracy: 1e-6)
         XCTAssertEqual(p.starD, 1.8, accuracy: 1e-6)
@@ -182,7 +216,7 @@ final class ManifestTests: XCTestCase {
             LayerRef(layer: $0, path: "\($0.rawValue).exr", format: .exr, width: 1400, height: 900)
         }
         return Manifest(target: target,
-                        look: Preset.auto.look,
+                        look: LookState.neutral,
                         colourMethod: .nativeWhiteBalance,
                         layers: layers,
                         stageOutcomes: [StageOutcome(stage: "plate-solve", succeeded: false,

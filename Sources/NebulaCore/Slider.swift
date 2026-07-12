@@ -2,14 +2,16 @@
 // Copyright (C) 2026 Nebula contributors
 import Foundation
 
-/// The eight user-facing controls. Plain language only — never jargon.
+/// The user-facing controls. Plain language only — never jargon.
 ///
 /// Each case maps to an internal engine parameter and the layer it acts on
-/// (design §6). The three non-advanced sliders are the headline front screen;
-/// the rest live under "Advanced".
+/// (design §6). The non-advanced sliders are the headline "feel" controls;
+/// the rest live under "Refine".
 public enum Slider: String, CaseIterable, Codable, Sendable {
     case glow
-    case colour
+    case saturation
+    case vibrance
+    case tint
     case stars
     case contrast
     case background
@@ -21,7 +23,9 @@ public enum Slider: String, CaseIterable, Codable, Sendable {
     public var displayName: String {
         switch self {
         case .glow:       return "Glow"
-        case .colour:     return "Colour"
+        case .saturation: return "Saturation"
+        case .vibrance:   return "Vibrance"
+        case .tint:       return "Tint"
         case .stars:      return "Stars"
         case .contrast:   return "Contrast"
         case .background: return "Background"
@@ -31,11 +35,11 @@ public enum Slider: String, CaseIterable, Codable, Sendable {
         }
     }
 
-    /// The three headline sliders on the front screen; the rest are hidden
-    /// behind the "Advanced" disclosure.
+    /// The headline "feel" sliders shown up top (Glow, the colour trio, Stars);
+    /// the rest are grouped under "Refine".
     public var isAdvanced: Bool {
         switch self {
-        case .glow, .colour, .stars:
+        case .glow, .saturation, .vibrance, .tint, .stars:
             return false
         default:
             return true
@@ -45,7 +49,7 @@ public enum Slider: String, CaseIterable, Codable, Sendable {
     /// Which baked layer this control ultimately acts on (design §6 table).
     public var actsOn: LayerKind {
         switch self {
-        case .glow, .contrast, .background, .colour, .detail:
+        case .glow, .contrast, .background, .saturation, .vibrance, .tint, .detail:
             return .starless
         case .starSize:
             return .stars

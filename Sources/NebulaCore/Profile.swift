@@ -19,13 +19,12 @@ public enum Profile: String, CaseIterable, Codable, Sendable {
         }
     }
 
-    /// The initial look applied when a target of this profile finishes baking.
-    /// A starting point the user then refines; all four begin from `Auto` and
-    /// nudge toward what each target type usually wants.
+    /// The initial look applied when a target of this profile finishes baking —
+    /// the pleasant, finished starting point the user then refines ("one tap → a
+    /// developed image"). Profiles stay useful metadata; the default look gives
+    /// every target the same developed opening regardless of type.
     public var initialLook: LookState {
-        // Target classification must not silently alter pixels. Profiles remain
-        // useful metadata, while Auto always opens on the preserved master.
-        Preset.auto.look
+        LookState.default
     }
 
     /// Best-guess profile from Seestar FITS header hints. Broadband nebula is the

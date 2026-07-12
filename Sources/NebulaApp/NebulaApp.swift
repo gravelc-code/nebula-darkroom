@@ -54,8 +54,7 @@ final class EngineModel: ObservableObject {
     @Published var progress = BakeRunner.Progress(fraction: 0, status: "")
     @Published var targetName = ""
 
-    @Published var look: LookState = Preset.auto.look
-    @Published var activePreset: Preset? = .auto
+    @Published var look: LookState = .default
     @Published var compare = false
     @Published var divider: Float = 0.5
     @Published var showClipping = false
@@ -214,8 +213,7 @@ final class EngineModel: ObservableObject {
             invalidateAIPreview()
             bundle = b
             currentBakeDir = dir
-            look = manifest?.look ?? Preset.auto.look
-            activePreset = Preset.matching(look)
+            look = manifest?.look ?? .default
             phase = .editing
             // Pre-warm the Library thumbnail from the freshly-loaded bundle so a
             // just-baked target shows a card instantly next time (no reload).
@@ -326,7 +324,7 @@ final class EngineModel: ObservableObject {
         let b = renderer.makeBundle(master: m, corrected: corrected, denoised: d, starless: s, stars: st,
                                     profile: manifest?.target.profile)
         guard let cg = try? renderer.renderThumbnail(
-            bundle: b, params: (manifest?.look ?? Preset.auto.look).engineParams, maxDimension: 480)
+            bundle: b, params: (manifest?.look ?? .default).engineParams, maxDimension: 480)
         else { return nil }
         writeCGImagePNG(cg, to: t.thumbURL)
         let img = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
@@ -349,13 +347,13 @@ final class EngineModel: ObservableObject {
         CGImageDestinationFinalize(dest)
     }
 
-    func apply(_ preset: Preset) {
-        look = preset.look; activePreset = preset
+    /// Reset every control to the developed default look.
+    func resetLook() {
+        look = .default
         invalidateAIPreview()
         scheduleLookSave()
     }
     func edited() {
-        activePreset = Preset.matching(look)
         invalidateAIPreview()
         scheduleLookSave()
     }
@@ -1003,21 +1001,6 @@ struct EditorView: View {
         VStack(spacing: 0) {
             ScrollView {
                 VStack(spacing: 12) {
-                    sectionCard("LOOK") {
-                        HStack(spacing: 5) {
-                            ForEach(Preset.allCases, id: \.self) { preset in
-                                Button(preset.displayName) { model.apply(preset) }
-                                    .buttonStyle(.plain)
-                                    .font(.caption.weight(.semibold))
-                                    .foregroundStyle(model.activePreset == preset ? .white : .secondary)
-                                    .frame(maxWidth: .infinity).padding(.vertical, 8)
-                                    .background(model.activePreset == preset
-                                                ? Color.accentColor.opacity(0.85)
-                                                : Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 7))
-                            }
-                        }
-                    }
-
                     sectionCard("ESSENTIALS") {
                         VStack(spacing: 10) {
                             ForEach(Control.headline, id: \.self) { sliderRow($0) }
@@ -1029,6 +1012,17 @@ struct EditorView: View {
                             ForEach(Control.advanced, id: \.self) { sliderRow($0) }
                         }
                     }
+
+                    Button {
+                        model.resetLook()
+                    } label: {
+                        Label("Reset to developed look", systemImage: "arrow.counterclockwise")
+                            .font(.caption.weight(.semibold))
+                            .frame(maxWidth: .infinity).padding(.vertical, 8)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
                 }
                 .padding(.horizontal, 14).padding(.top, 14).padding(.bottom, 12)
             }

@@ -5,9 +5,9 @@ import NebulaCore
 import NebulaEngine
 import NebulaAI
 
-// nebula-render <layers_dir> <preset> <out.png> [slider=value ...]
+// nebula-render <layers_dir> <base> <out.png> [slider=value ...]
 //   layers_dir : a bake output dir with master/denoised/starless/stars .fits
-//   preset     : auto | natural | vivid | deep
+//   base       : default (the developed opening look) | neutral (truthful)
 //   out.png    : where to write the rendered frame
 //   slider=v   : optional overrides (0…1), e.g. detail=1 denoise=0 background=0.9
 //   enhance=s  : AI super-resolution at strength s (needs NEBULA_SUPERRES_MODEL or
@@ -19,18 +19,22 @@ import NebulaAI
 let args = CommandLine.arguments
 guard args.count >= 4 else {
     FileHandle.standardError.write(Data(
-        "usage: nebula-render <layers_dir> <preset> <out.png> [slider=value ...]\n".utf8))
+        "usage: nebula-render <layers_dir> <default|neutral> <out.png> [slider=value ...]\n".utf8))
     exit(2)
 }
 let dir = URL(fileURLWithPath: args[1])
-guard let preset = Preset(rawValue: args[2]) else {
-    FileHandle.standardError.write(Data("unknown preset '\(args[2])'\n".utf8))
+let baseLook: LookState
+switch args[2] {
+case "default": baseLook = .default
+case "neutral", "auto": baseLook = .neutral
+default:
+    FileHandle.standardError.write(Data("unknown base look '\(args[2])' (use default|neutral)\n".utf8))
     exit(2)
 }
 let out = URL(fileURLWithPath: args[3])
 
-// Apply any `slider=value` overrides to the preset's look (dev/testing).
-var look = preset.look
+// Apply any `slider=value` overrides to the base look (dev/testing).
+var look = baseLook
 var exportScale = 1
 var enhanceStrength: Float?
 for kv in args.dropFirst(4) {
@@ -85,11 +89,11 @@ do {
         FileHandle.standardError.write(Data("\n".utf8))
         let enlarged = FITSImage.fromHWC(result.0, width: result.2, height: result.1, channels: 3)
         try renderer.writePNG(enlarged, to: out)
-        print("rendered \(preset.displayName) + AI ×\(result.1 / rendered.height) → \(out.path)  "
+        print("rendered \(args[2]) + AI ×\(result.1 / rendered.height) → \(out.path)  "
               + "(\(result.2)×\(result.1), \(Int(-started.timeIntervalSinceNow))s)")
     } else {
         try renderer.renderPNG(bundle: bundle, params: look.engineParams, scale: exportScale, to: out)
-        print("rendered \(preset.displayName) → \(out.path)  (\(bundle.width)×\(bundle.height))")
+        print("rendered \(args[2]) → \(out.path)  (\(bundle.width)×\(bundle.height))")
     }
 } catch {
     FileHandle.standardError.write(Data("error: \(error)\n".utf8))
