@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Nebula contributors
 # Package Nebula.app into a drag-to-Applications DMG. Builds the app first via
 # build-app.sh. The DMG is NOT notarised (needs an Apple Developer ID) — on
 # another Mac, first launch is right-click → Open to get past Gatekeeper.

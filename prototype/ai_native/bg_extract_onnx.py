@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Nebula contributors
 """Phase 2 spike: reproduce GraXpert's AI background-extraction in-process.
 
 Faithful port of GraXpert 3.0.2 `graxpert/background_extraction.py::extract_background`

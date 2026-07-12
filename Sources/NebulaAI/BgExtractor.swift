@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nebula contributors
 import Foundation
 
 /// Port of GraXpert 3.0.2 `background_extraction.py` (AI + Subtraction path,

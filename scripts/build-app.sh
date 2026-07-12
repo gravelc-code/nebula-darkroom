@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Nebula contributors
 # Assemble a self-contained Nebula.app from the SwiftPM build: the release
 # executable + the onnxruntime framework + the Real-ESRGAN model + Info.plist,
 # ad-hoc signed so it runs locally. GraXpert's AI models are deliberately NOT
@@ -39,7 +41,10 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resources/Models"
 cp "$BIN" "$APP/Contents/MacOS/Nebula"
 
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+# Release version: override with NEBULA_VERSION=x.y.z (see docs/RELEASING.md).
+VERSION="${NEBULA_VERSION:-0.1}"
+
+cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -48,7 +53,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleIdentifier</key><string>com.nebula.app</string>
   <key>CFBundleExecutable</key><string>Nebula</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.1</string>
+  <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>CFBundleVersion</key><string>1</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>
@@ -115,6 +120,8 @@ if [ -n "$SIRIL_BIN" ] && command -v dylibbundler >/dev/null 2>&1; then
   done
   codesign --force --sign - "$SDIR/siril" "$SDIR/libs"/*.dylib >/dev/null 2>&1 || true
   echo "  · bundled Siril + $(ls "$SDIR/libs" | wc -l | tr -d ' ') dylibs"
+  # Licence inventory for the bundled closure (referenced by NOTICES.md).
+  bash "$HERE/scripts/gen-notices.sh" "$SDIR/libs" "$APP/Contents/Resources/NOTICES-bundled.txt" || true
 else
   echo "  Siril: not bundled (need siril + dylibbundler) — discovered from Homebrew at runtime."
 fi

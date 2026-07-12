@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Nebula contributors
 # Run SwiftPM with full Xcode even when the machine-wide xcode-select points to
 # Command Line Tools. Usage: scripts/swift-xcode.sh build|test [arguments...]
 set -euo pipefail

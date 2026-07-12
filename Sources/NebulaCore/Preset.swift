@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nebula contributors
 import Foundation
 
 /// Presets are just named look states — "one tap, instantly previewed".

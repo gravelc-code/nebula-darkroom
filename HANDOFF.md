@@ -136,3 +136,29 @@ so re-opening a target is instant. The bake driver lives in
 - [x] GraXpert + StarNet binaries (Phase 0 real AI) — GraXpert 3.0.2 DMG + StarNetPro's starnet2
 - [ ] GraXpert/StarNet **ONNX weights** for in-process CoreML (Phase 2)
 - [ ] Apple Developer ID for notarisation (Phase 5)
+
+## 2026-07-12 · Star fix + open-source release prep
+
+- **Big blurry stars fixed at the engine**: Star Size is now bidirectional —
+  50 reproduces the captured profiles bit-exactly, below 50 erodes the real
+  star flux in linear space (continuous greyscale erosion, radius 0→3 px), and
+  above 50 blooms as before. Presets re-tuned (Auto 50 · Natural 45 · Vivid 55
+  · Deep 35). Verified on M 8: halos pull in cleanly, dark lanes untouched, no
+  ring artefacts even at Star Size 0.
+- **Drizzle investigated and rejected**: 2× CFA drizzle (Siril 1.4
+  `register -2pass` + `seqapplyreg -drizzle -scale=2` on non-debayered lights)
+  gives an identical native-unit PSF on Seestar data (FWHM 4.04 vs 4.06 px on
+  the same M 8 subs, measured with `findstar`) — the stack is seeing-limited,
+  so drizzle just costs 4× pixels/AI time. Star sharpness work stays render-side.
+- **Model licensing settled**: GraXpert's model endpoint is private (embedded
+  S3 credentials; even Siril requires a GraXpert install), so the DMG no
+  longer bundles bge/denoise (~700 MB → ~100 MB). First develop without models
+  shows a one-time "install GraXpert" sheet; discovery also reads
+  `~/Library/Application Support/Nebula/Models`. The `starnet2` Homebrew cask
+  is currently broken upstream (checksum mismatch) — StarNet stays a
+  `NEBULA_STARNET` user hook only.
+- **Publish prep**: personal paths scrubbed, `Package.resolved` committed,
+  SPDX `GPL-3.0-only` headers on all sources, README/NOTICES rewritten
+  (accurate architecture; models downloaded-not-shipped), CONTRIBUTING.md,
+  GitHub Actions CI (`.github/workflows/ci.yml`), `docs/RELEASING.md`,
+  `scripts/gen-notices.sh` (bundled-dylib licence inventory at DMG build).

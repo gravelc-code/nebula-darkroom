@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nebula contributors
 import Foundation
 
 /// The complete look: the ~8 floats that fully describe how a baked target is

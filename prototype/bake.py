@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Nebula contributors
 """Nebula Phase 0 bake prototype (dev-only — never shipped).
 
 Turns one Seestar `<Target>_subs/` folder into the four float layers

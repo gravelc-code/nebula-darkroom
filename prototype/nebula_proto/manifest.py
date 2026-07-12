@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Nebula contributors
 """Assemble and write `manifest.json` matching Swift `NebulaCore.Manifest`.
 
 Field names, enum raw values, and the flat look dict all mirror the Swift types

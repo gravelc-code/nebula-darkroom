@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Nebula contributors
 # Nebula real-AI bake entry point — the one durable command the app shells out to.
 #
 #   nebula-bake.sh <subs_dir_or_master> --out <out_dir> [extra bake.py args...]

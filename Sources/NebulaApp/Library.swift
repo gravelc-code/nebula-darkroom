@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nebula contributors
 import Foundation
 
 /// A previously-developed target sitting in the bake cache. The Library grid

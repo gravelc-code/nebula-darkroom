@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Nebula contributors
 # GraXpert background-extraction wrapper: linear FITS in -> bg-removed FITS out.
 # Tool location is env-configured (durable): set GRAXPERT_BIN to the GraXpert
 # executable, e.g. /Applications/GraXpert.app/Contents/MacOS/GraXpert.

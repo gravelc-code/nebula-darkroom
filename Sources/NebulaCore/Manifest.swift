@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nebula contributors
 import Foundation
 
 /// The four floating-point layers emitted by the bake (design §4 step 9).

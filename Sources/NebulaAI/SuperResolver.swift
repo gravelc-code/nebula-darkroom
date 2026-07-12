@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nebula contributors
 import Foundation
 
 /// Tiled ONNX super-resolution for Real-ESRGAN-style models. Input and output

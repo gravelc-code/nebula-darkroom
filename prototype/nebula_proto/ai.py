@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Nebula contributors
 """AI stages (design §4 steps 6-8): background removal, denoise, star separation.
 
 In the *shipping* app these run in-process via CoreML (Phase 2). In this Phase 0

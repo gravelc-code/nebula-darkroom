@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Nebula contributors
 """Drive headless Siril for the classical DSP stages (design §4 steps 2-5):
 register → stack (with inline frame selection) → plate-solve → colour-calibrate.
 

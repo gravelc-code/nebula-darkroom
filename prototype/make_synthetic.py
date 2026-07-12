@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Nebula contributors
 """Generate synthetic test data for the Phase 0 prototype.
 
 This is a stand-in so the pipeline can be exercised *before* real Seestar subs

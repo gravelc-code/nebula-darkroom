@@ -13,9 +13,9 @@ This file orients you fast. Deeper detail lives in:
 ## The one architectural idea: bake once, play forever
 
 1. **Bake** (slow, once per target, cached): register + stack the subs, remove
-   the sky gradient, denoise, separate stars → **four float FITS layers**
-   (`master · denoised · starless · stars`) + a typed `manifest.json`.
-2. **Play** (instant, interactive): the Metal engine composites those four layers
+   the sky gradient, denoise, separate stars → **five float FITS layers**
+   (`master · corrected · denoised · starless · stars`) + a typed `manifest.json`.
+2. **Play** (instant, interactive): the Metal engine composites those layers
    under the current slider look at 120 fps. **Preview == export** — the same
    shaders drive the live view and the 16-bit PNG.
 
@@ -58,15 +58,17 @@ scripts/swift-xcode.sh build --product NebulaApp --scratch-path /tmp/nebula-buil
 # Native bake from the CLI (no app):
 /tmp/nebula-build/debug/nebula-bake-native "<…_sub folder>" <out_dir>
 
-# Ship: a fully self-contained app + DMG (bundles onnxruntime + models + Siril):
+# Ship: a self-contained app + DMG (bundles onnxruntime + Siril; GraXpert's
+# bge/denoise models are NEVER bundled — see NOTICES.md):
 scripts/build-app.sh      # → build/Nebula.app  (needs Homebrew siril + dylibbundler)
-scripts/build-dmg.sh      # → build/Nebula.dmg  (drag-to-Applications, ~700 MB)
+scripts/build-dmg.sh      # → build/Nebula.dmg  (drag-to-Applications, ~100 MB)
 ```
 
 Dev prerequisites: Xcode 26+/Swift 6+, `brew install siril dylibbundler`. GraXpert's
-ONNX models are auto-discovered from `~/Library/Application Support/GraXpert/…`
-(the shipping app bundles them in `Resources/Models`). Bakes cache to
-`~/Library/Caches/Nebula/<target>/`.
+ONNX models are auto-discovered (env override → app bundle → `~/Library/Application
+Support/Nebula/Models` → GraXpert's own cache) but **never redistributed** — the
+shipping app shows a one-time "install GraXpert" explainer instead (see NOTICES.md).
+Bakes cache to `~/Library/Caches/Nebula/<target>/`.
 
 Launch env hooks (useful for headless testing): `NEBULA_WATCH=<dir>` (start watch
 mode), `NEBULA_LAYERS=<bakeDir>` (open straight into editor).
@@ -76,6 +78,8 @@ mode), `NEBULA_LAYERS=<bakeDir>` (open straight into editor).
 - **Preview == export**: both go through `ChainRenderer.encodeChain`. Any look change must be in the shader chain, not a one-off.
 - **No Python in the shipping build.** `prototype/` is reference only; `NebulaBake` is what ships.
 - **No jargon in UI strings** (there's a test for this): the user sees Glow/Colour/Stars/Contrast/Background/Detail/Star Size/Denoise, never "GHS"/"SPCC"/"starless".
+- **Star Size is bidirectional**: 50 = the captured profiles bit-exactly; below erodes the real star flux (star reduction), above blooms. Don't reintroduce always-on bloom.
+- **GraXpert models and StarNet are never bundled or auto-downloaded** (licence terms; even Siril requires a GraXpert install to get the models — their S3 credentials are private).
 
 ## Gotchas that cost real time (all fixed in code — keep them fixed)
 - **Siril `-out=` can't express a space or a quote** → run its `-out=` writes in a space-free scratch dir (real targets are "M 83"). (`SirilStage`)

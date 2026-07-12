@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nebula contributors
 /// The Metal shader chain (design §5), compiled at runtime from source so the
 /// engine needs no `.metallib` build rule. The SAME kernels are used for the
 /// interactive preview and the tiled export — that identity is *why* "preview ==

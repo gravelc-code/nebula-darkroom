@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Nebula contributors
 """Phase 0 bake prototype for Nebula (dev-only, never shipped).
 
 Mirrors the Swift `NebulaCore` structure so the emitted `manifest.json` matches

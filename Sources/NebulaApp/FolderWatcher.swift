@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nebula contributors
 import Foundation
 
 /// Watch mode (design §6): watch a parent folder for new Seestar `<Target>_sub(s)`

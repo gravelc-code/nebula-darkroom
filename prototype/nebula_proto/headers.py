@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Nebula contributors
 """Read Seestar FITS headers → capture stats + a profile guess (design §3).
 
 Header keys vary between Seestar firmware versions and capture tools, so every

@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Nebula contributors
 # GraXpert denoising wrapper: linear FITS in -> denoised FITS out.
 # Set GRAXPERT_BIN to the GraXpert executable (see gx_bg.sh).
 # Called by the bake as:  gx_denoise.sh <input.fits> <output.fits>
