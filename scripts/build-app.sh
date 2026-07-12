@@ -1,17 +1,33 @@
 #!/bin/bash
 # Assemble a self-contained Nebula.app from the SwiftPM build: the release
-# executable + the onnxruntime framework + the bundled ONNX models + Info.plist,
-# ad-hoc signed so it runs locally. This is the Phase-5 shipping foundation
-# (notarised DMG still needs an Apple Developer ID).
+# executable + the onnxruntime framework + the Real-ESRGAN model + Info.plist,
+# ad-hoc signed so it runs locally. GraXpert's AI models are deliberately NOT
+# bundled (unconfirmed redistribution terms) — the app guides users to install
+# GraXpert once instead. (Notarised DMG still needs an Apple Developer ID.)
 #
-# Not yet bundled: Siril. It's discovered from Homebrew at runtime; bundling its
-# ~38-dylib GTK dependency tree is a separate packaging task.
+# Siril and its dylib closure are bundled below when the Homebrew development
+# copy is available.
 set -euo pipefail
+
+# `xcode-select` may point at the standalone Command Line Tools even when full
+# Xcode is installed. CLT lacks SwiftUI macro plugins and XCTest, so SwiftPM
+# emits misleading source errors. Select full Xcode for this process only.
+if [ "$(xcode-select -p 2>/dev/null || true)" = "/Library/Developer/CommandLineTools" ]; then
+  for candidate in /Applications/Xcode.app /Applications/Xcode-beta.app; do
+    if [ -d "$candidate/Contents/Developer" ]; then
+      export DEVELOPER_DIR="$candidate/Contents/Developer"
+      break
+    fi
+  done
+fi
+if ! xcrun --find xcodebuild >/dev/null 2>&1; then
+  echo "error: full Xcode is required (SwiftUI macros are not included in Command Line Tools)" >&2
+  exit 1
+fi
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 SCRATCH="${SCRATCH:-/tmp/nebula-build}"
 APP="$HERE/build/Nebula.app"
-GX="$HOME/Library/Application Support/GraXpert"
 
 echo "▸ release build"
 swift build -c release --product NebulaApp --scratch-path "$SCRATCH"
@@ -47,11 +63,13 @@ if [ -d "$FWDIR/onnxruntime.framework" ]; then
   echo "  · bundled onnxruntime.framework"
 fi
 
-# Bundled ONNX models -> self-contained AI (no external GraXpert.app).
-DN="$(ls -t "$GX"/denoise-ai-models/*/model.onnx 2>/dev/null | head -1 || true)"
-BG="$(ls -t "$GX"/bge-ai-models/*/model.onnx 2>/dev/null | head -1 || true)"
-[ -n "$DN" ] && cp "$DN" "$APP/Contents/Resources/Models/denoise.onnx" && echo "  · bundled denoise model"
-[ -n "$BG" ] && cp "$BG" "$APP/Contents/Resources/Models/bge.onnx" && echo "  · bundled bge model"
+# GraXpert's bge/denoise models are NOT bundled: their redistribution terms are
+# unconfirmed, so the app guides the user to install GraXpert (free, GPL) once
+# and reads its model cache. Only Real-ESRGAN (BSD-3, reproducibly converted by
+# scripts/convert-realesrgan-x2.py) ships in the bundle.
+NM="$HOME/Library/Application Support/Nebula/Models"
+SR="${NEBULA_SUPERRES_MODEL:-$NM/superres.onnx}"
+[ -f "$SR" ] && cp "$SR" "$APP/Contents/Resources/Models/superres.onnx" && echo "  · bundled AI super-resolution model"
 
 # Bundle Siril (register/stack) + its dylib closure -> a self-contained app that
 # needs no `brew install siril`. dylibbundler gets ~93 libs; a short loop then
@@ -101,5 +119,10 @@ else
   echo "  Siril: not bundled (need siril + dylibbundler) — discovered from Homebrew at runtime."
 fi
 
+# Dropbox/File Provider attaches resource-fork-like metadata inside a freshly
+# assembled bundle. Strip it before signing and once more afterwards in case it
+# races the signer; the latter does not alter signed file contents.
+xattr -cr "$APP" 2>/dev/null || true
 codesign --force --deep --sign - "$APP" >/dev/null 2>&1 || true
+xattr -cr "$APP" 2>/dev/null || true
 echo "✓ built $APP"

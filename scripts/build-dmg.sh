@@ -12,7 +12,9 @@ bash "$HERE/scripts/build-app.sh"
 
 echo "▸ packaging DMG"
 STAGE="$(mktemp -d)"
-cp -R "$APP" "$STAGE/Nebula.app"
+COPYFILE_DISABLE=1 cp -R "$APP" "$STAGE/Nebula.app"
+xattr -cr "$STAGE/Nebula.app" 2>/dev/null || true
+codesign --verify --deep --strict "$STAGE/Nebula.app"
 ln -s /Applications "$STAGE/Applications"       # drag-install target
 rm -f "$DMG"
 hdiutil create -volname "Nebula" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null

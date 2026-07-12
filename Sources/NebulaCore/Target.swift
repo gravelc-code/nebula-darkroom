@@ -8,6 +8,11 @@ public struct CaptureStats: Codable, Equatable, Sendable {
     public var frameCount: Int
     /// Per-sub exposure in seconds (Seestar lights are 10 s).
     public var subExposureSeconds: Double
+    /// Exact integration when a folder contains more than one exposure length.
+    /// Older manifests omit this and retain the frameCount × subExposure fallback.
+    public var totalIntegrationSeconds: Double?
+    /// True when more than one exposure length was accepted into the stack.
+    public var hasMixedExposures: Bool
     /// `FILTER` header value, if present (e.g. "LP", "IRCUT", "Duo-band").
     public var filter: String?
     /// Whether the capture is broadband (clear/LP) vs duo-band/narrowband.
@@ -20,6 +25,8 @@ public struct CaptureStats: Codable, Equatable, Sendable {
 
     public init(frameCount: Int,
                 subExposureSeconds: Double,
+                totalIntegrationSeconds: Double? = nil,
+                hasMixedExposures: Bool = false,
                 filter: String? = nil,
                 isBroadband: Bool = true,
                 raDegrees: Double? = nil,
@@ -27,6 +34,8 @@ public struct CaptureStats: Codable, Equatable, Sendable {
                 sensorTemperatureC: Double? = nil) {
         self.frameCount = frameCount
         self.subExposureSeconds = subExposureSeconds
+        self.totalIntegrationSeconds = totalIntegrationSeconds
+        self.hasMixedExposures = hasMixedExposures
         self.filter = filter
         self.isBroadband = isBroadband
         self.raDegrees = raDegrees
@@ -36,7 +45,7 @@ public struct CaptureStats: Codable, Equatable, Sendable {
 
     /// Total integration time in seconds.
     public var integrationSeconds: Double {
-        Double(frameCount) * subExposureSeconds
+        totalIntegrationSeconds ?? Double(frameCount) * subExposureSeconds
     }
 
     /// Human-readable integration time, e.g. "48 min" or "1 h 12 min".
@@ -53,7 +62,42 @@ public struct CaptureStats: Codable, Equatable, Sendable {
             ? String(Int(subExposureSeconds))
             : String(subExposureSeconds)
         let band = isBroadband ? "broadband" : "narrowband"
-        return "\(integrationDescription) integrated · \(frameCount) × \(sub)s · \(band)"
+        let frames = hasMixedExposures ? "\(frameCount) mixed exposures" : "\(frameCount) × \(sub)s"
+        return "\(integrationDescription) integrated · \(frames) · \(band)"
+    }
+}
+
+// Keep schema-1 manifests readable after mixed-exposure accounting was added.
+extension CaptureStats {
+    private enum CodingKeys: String, CodingKey {
+        case frameCount, subExposureSeconds, totalIntegrationSeconds, hasMixedExposures
+        case filter, isBroadband, raDegrees, decDegrees, sensorTemperatureC
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        frameCount = try c.decode(Int.self, forKey: .frameCount)
+        subExposureSeconds = try c.decode(Double.self, forKey: .subExposureSeconds)
+        totalIntegrationSeconds = try c.decodeIfPresent(Double.self, forKey: .totalIntegrationSeconds)
+        hasMixedExposures = try c.decodeIfPresent(Bool.self, forKey: .hasMixedExposures) ?? false
+        filter = try c.decodeIfPresent(String.self, forKey: .filter)
+        isBroadband = try c.decode(Bool.self, forKey: .isBroadband)
+        raDegrees = try c.decodeIfPresent(Double.self, forKey: .raDegrees)
+        decDegrees = try c.decodeIfPresent(Double.self, forKey: .decDegrees)
+        sensorTemperatureC = try c.decodeIfPresent(Double.self, forKey: .sensorTemperatureC)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(frameCount, forKey: .frameCount)
+        try c.encode(subExposureSeconds, forKey: .subExposureSeconds)
+        try c.encodeIfPresent(totalIntegrationSeconds, forKey: .totalIntegrationSeconds)
+        try c.encode(hasMixedExposures, forKey: .hasMixedExposures)
+        try c.encodeIfPresent(filter, forKey: .filter)
+        try c.encode(isBroadband, forKey: .isBroadband)
+        try c.encodeIfPresent(raDegrees, forKey: .raDegrees)
+        try c.encodeIfPresent(decDegrees, forKey: .decDegrees)
+        try c.encodeIfPresent(sensorTemperatureC, forKey: .sensorTemperatureC)
     }
 }
 

@@ -3,6 +3,8 @@ import Foundation
 /// The four floating-point layers emitted by the bake (design §4 step 9).
 public enum BakedLayer: String, CaseIterable, Codable, Sendable {
     case master
+    /// Reversible calibrated / gradient-corrected alternative to `master`.
+    case corrected
     case denoised
     case starless
     case stars
@@ -101,7 +103,8 @@ public struct Manifest: Codable, Equatable, Sendable {
 
     /// True when all four layers are present — the precondition for Stage B.
     public var hasAllLayers: Bool {
-        Set(layers.map(\.layer)) == Set(BakedLayer.allCases)
+        let present = Set(layers.map(\.layer))
+        return Set([.master, .denoised, .starless, .stars]).isSubset(of: present)
     }
 
     // MARK: JSON round-trip helpers (the on-disk `manifest.json`)

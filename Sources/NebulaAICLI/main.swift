@@ -5,6 +5,7 @@ import NebulaEngine
 // nebula-ai: native in-process replacement for the GraXpert subprocess.
 //   nebula-ai denoise <in.fits> <out.fits> [--strength S] [--model P]
 //   nebula-ai bg      <in.fits> <out.fits> [--model P]
+//   nebula-ai superres <in.fits> <out.fits> --model P
 // Models default to the GraXpert model cache; override with --model or the
 // NEBULA_DENOISE_MODEL / NEBULA_BGE_MODEL env vars.
 
@@ -55,7 +56,7 @@ func optValue(_ args: [String], _ flag: String) -> String? {
 
 let args = CommandLine.arguments
 guard args.count >= 4 else {
-    die("usage: nebula-ai <denoise|bg> <in.fits> <out.fits> [--strength S] [--model P]")
+    die("usage: nebula-ai <denoise|bg|superres> <in.fits> <out.fits> [--strength S] [--model P]")
 }
 let cmd = args[1], inPath = args[2], outPath = args[3]
 
@@ -63,6 +64,7 @@ do {
     let img = try FITSImage.read(URL(fileURLWithPath: inPath))
     let hwc = toHWC(img)
     let result: [Float]
+    var outputWidth = img.width, outputHeight = img.height
 
     switch cmd {
     case "denoise":
@@ -78,11 +80,19 @@ do {
         else { die("bge model not found (set --model or NEBULA_BGE_MODEL)") }
         result = try BgExtractor(modelPath: model)
             .extract(pixels: hwc, h: img.height, w: img.width, c: img.channels, smoothing: 0)
+    case "superres":
+        guard img.channels == 3 else { die("superres requires an RGB FITS image") }
+        guard let model = optValue(args, "--model")
+            ?? ProcessInfo.processInfo.environment["NEBULA_SUPERRES_MODEL"]
+        else { die("super-resolution model not found (set --model or NEBULA_SUPERRES_MODEL)") }
+        let upscaled = try SuperResolver(modelPath: model)
+            .upscale(pixels: hwc, h: img.height, w: img.width)
+        result = upscaled.0; outputHeight = upscaled.1; outputWidth = upscaled.2
     default:
-        die("unknown command '\(cmd)' (expected denoise|bg)")
+        die("unknown command '\(cmd)' (expected denoise|bg|superres)")
     }
 
-    try fromHWC(result, width: img.width, height: img.height, channels: img.channels)
+    try fromHWC(result, width: outputWidth, height: outputHeight, channels: img.channels)
         .write(URL(fileURLWithPath: outPath))
     print("nebula-ai \(cmd): \(inPath) -> \(outPath)")
 } catch {

@@ -1,5 +1,6 @@
 import Foundation
 import NebulaBake
+import NebulaCore
 
 /// Drives the **native** Nebula bake (Phase 3): Siril register/stack as a
 /// subprocess + background-removal / denoise **in-process** via NebulaAI + a
@@ -27,17 +28,29 @@ final class BakeRunner {
         }
     }
 
+    nonisolated static func hasCurrentPipeline(in dir: URL) -> Bool {
+        guard hasAllLayers(in: dir),
+              FileManager.default.fileExists(atPath: dir.appendingPathComponent("corrected.fits").path),
+              let data = try? Data(contentsOf: dir.appendingPathComponent("manifest.json")),
+              let manifest = try? NebulaCore.Manifest(jsonData: data) else { return false }
+        return manifest.stageOutcomes.contains { $0.stage == "pipeline-v5" && $0.succeeded }
+    }
+
     /// Bake `subsDir` into a layers dir, streaming progress via `onProgress`
     /// (on the main actor). Returns the output dir or a failure message. A
     /// complete cached bake returns immediately.
     func bake(subsDir: URL, target: String,
               onProgress: @MainActor (Progress) -> Void) async -> Outcome {
         let out = Self.cacheDir(forTarget: target)
-        if Self.hasAllLayers(in: out) {
+        if Self.hasCurrentPipeline(in: out) {
             onProgress(Progress(fraction: 1.0, status: "Loaded cached bake"))
             return .success(out)
         }
         try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
+        try? FileManager.default.removeItem(at: out.appendingPathComponent("thumb.png"))
+        for name in ["master", "corrected", "denoised", "starless", "stars"] {
+            try? FileManager.default.removeItem(at: out.appendingPathComponent("\(name).fits"))
+        }
         // Remember where this bake came from so the Library can offer "Re-develop".
         try? subsDir.path.write(to: out.appendingPathComponent("source.txt"),
                                 atomically: true, encoding: .utf8)

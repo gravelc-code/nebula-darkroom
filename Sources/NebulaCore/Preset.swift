@@ -26,17 +26,20 @@ public enum Preset: String, CaseIterable, Codable, Sendable {
     private var percentValues: [Slider: Double] {
         switch self {
         case .auto:
-            return [.glow: 60, .colour: 55, .stars: 65, .contrast: 50,
-                    .background: 55, .detail: 40, .starSize: 45, .denoise: 60]
+            // Truthful baseline: only the robust statistical linear->display
+            // stretch is active. Every creative/destructive stage starts off.
+            // Star Size is bidirectional, so its "off" is the 50 midpoint.
+            return [.glow: 0, .colour: 50, .stars: 100, .contrast: 50,
+                    .background: 0, .detail: 0, .starSize: 50, .denoise: 0]
         case .natural:
-            return [.glow: 48, .colour: 40, .stars: 62, .contrast: 44,
-                    .background: 48, .detail: 32, .starSize: 42, .denoise: 66]
+            return [.glow: 48, .colour: 45, .stars: 62, .contrast: 50,
+                    .background: 66, .detail: 32, .starSize: 45, .denoise: 60]
         case .vivid:
-            return [.glow: 70, .colour: 86, .stars: 72, .contrast: 64,
-                    .background: 58, .detail: 52, .starSize: 50, .denoise: 56]
+            return [.glow: 66, .colour: 82, .stars: 72, .contrast: 68,
+                    .background: 84, .detail: 52, .starSize: 55, .denoise: 56]
         case .deep:
-            return [.glow: 84, .colour: 62, .stars: 44, .contrast: 60,
-                    .background: 74, .detail: 64, .starSize: 40, .denoise: 72]
+            return [.glow: 80, .colour: 66, .stars: 44, .contrast: 70,
+                    .background: 92, .detail: 60, .starSize: 35, .denoise: 70]
         }
     }
 

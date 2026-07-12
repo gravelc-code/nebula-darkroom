@@ -39,6 +39,19 @@ public struct FITSImage: Sendable {
         return FITSImage(width: width, height: height, channels: channels, rgba: rgba)
     }
 
+    /// Copy a rectangular region while retaining the layer's channel contract.
+    public func cropped(x: Int, y: Int, width newWidth: Int, height newHeight: Int) -> FITSImage {
+        let x0 = min(max(x, 0), width - 1), y0 = min(max(y, 0), height - 1)
+        let cw = min(max(newWidth, 1), width - x0), ch = min(max(newHeight, 1), height - y0)
+        var out = [Float](repeating: 1, count: cw * ch * 4)
+        for row in 0..<ch {
+            let source = ((y0 + row) * width + x0) * 4
+            let dest = row * cw * 4
+            out.replaceSubrange(dest..<(dest + cw*4), with: rgba[source..<(source + cw*4)])
+        }
+        return FITSImage(width: cw, height: ch, channels: channels, rgba: out)
+    }
+
     /// Read just the header cards (KEYWORD -> value string) — for capture metadata
     /// without decoding pixels.
     public static func readHeaderCards(_ url: URL) throws -> [String: String] {

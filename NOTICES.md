@@ -10,6 +10,7 @@ attribution and source availability are provided here and in the public reposito
 |-----------|------|---------|-------|
 | **Siril** | Classical DSP: register, stack, reject, plate-solve, colour calibration | GPL-3.0 | Version-pinned binary + dylibs bundled in `Contents/Frameworks`. One version per app release. |
 | **GraXpert background model** | Neural sky-gradient removal | (copyleft — confirm exact terms per release) | ONNX weights converted to CoreML, embedded in `Contents/Resources/Models`. |
+| **Real-ESRGAN / RealESRGAN_x2plus** | Optional AI presentation enlargement | BSD-3-Clause | Official v0.2.1 weights converted reproducibly to ONNX by `scripts/convert-realesrgan-x2.py`. Original SHA-256 `49fafd45…266abb`; ONNX SHA-256 `38d4a9e1…526161`. |
 | **StarNet / stellar-separation model** | Star ↔ nebulosity separation | (copyleft — confirm exact terms per release) | ONNX weights converted to CoreML. Final model chosen in Phase 2. |
 | **Plate-solve star index** | Blind/seeded solving at the Seestar focal length | catalogue-dependent | Trimmed to the Seestar's fixed focal length; bundled for offline first-run. |
 

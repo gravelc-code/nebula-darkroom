@@ -34,7 +34,7 @@ Data flows top-to-bottom. Deps point downward.
 | `NebulaCore` | lib | Pure, tested, no deps. The `LookState` (~8 normalized floats), `Slider`/`Preset`/`Profile`, `EngineParams` (slider→shader mapping), `Target`, and the `Manifest` bake↔play contract. **Single source of truth** shared by engine, bake, UI. |
 | `NebulaEngine` | lib | The Metal "Stage-B" engine: `ChainRenderer` (shader chain → live `MTKView` + 16-bit PNG), `Shaders.swift` (GHS stretch etc.), `FITSImage` (narrow float-FITS read/**write** + HWC helpers). |
 | `NebulaAI` | lib | In-process AI via onnxruntime (`onnxruntime` SPM pkg, imported as `OnnxRuntimeBindings`). `OrtModel` (persistent session), `Denoiser` + `BgExtractor` — faithful Swift ports of GraXpert's pipelines, validated bit-exact/visually-identical against the Python spikes. |
-| `NebulaBake` | lib | The **native bake orchestrator** (replaces Python `bake.py`). `SirilStage` (build .ssf, run Siril subprocess, register/stack/colour) + `Baker` (Siril → in-process AI → 4 layers + `Manifest`). Pluggable StarNet hook (`NEBULA_STARNET`); else `starless = master`. |
+| `NebulaBake` | lib | The **native bake orchestrator** (replaces Python `bake.py`). `SirilStage` selects one compatible filter group, then registers/stacks and attempts PCC; `Baker` runs in-process background removal + denoise and emits 4 layers + `Manifest`. A pluggable StarNet hook (`NEBULA_STARNET`) is preferred; otherwise a feathered classical star mask keeps star controls functional. |
 | `NebulaApp` | exe | The SwiftUI app. `NebulaApp.swift` (phases: Library grid → baking → editor), `BakeRunner` (drives `Baker` off-main, `AsyncStream` progress, cancellable), `Library`, `FolderWatcher` (watch mode), `Notifier`. |
 | `NebulaRender` | exe | `nebula-render <bakeDir> <preset> <out.png>` — headless export, proves the chain with no UI. |
 | `nebula-ai` (`NebulaAICLI`) | exe | FITS-in/out `denoise`/`bg` CLI — a drop-in for the GraXpert subprocess; models auto-discovered. |
@@ -48,10 +48,10 @@ Data flows top-to-bottom. Deps point downward.
 ```bash
 # IMPORTANT: this repo lives under Dropbox → in-tree .build codesigning is flaky.
 # Always build/test with a scratch path OUTSIDE the synced folder:
-swift build --scratch-path /tmp/nebula-build
-swift test  --scratch-path /tmp/nebula-build          # 19 tests (NebulaCore)
+scripts/swift-xcode.sh build --scratch-path /tmp/nebula-build
+scripts/swift-xcode.sh test  --scratch-path /tmp/nebula-build
 
-swift build --product NebulaApp --scratch-path /tmp/nebula-build
+scripts/swift-xcode.sh build --product NebulaApp --scratch-path /tmp/nebula-build
 /tmp/nebula-build/debug/NebulaApp                      # Library / drop a "…_subs" folder
 /tmp/nebula-build/debug/NebulaApp <folder>             # open a subs folder or bake dir directly
 

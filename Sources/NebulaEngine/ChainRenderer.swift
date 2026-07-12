@@ -10,6 +10,8 @@ import NebulaCore
 /// order MUST match `Uniforms` in the shader source.
 public struct EngineParamsGPU {
     var denoiseBlend: Float
+    var smoothStrength: Float
+    var correctionBlend: Float
     var blackPoint: Float
     var glowD: Float
     var contrastSP: Float
@@ -17,16 +19,19 @@ public struct EngineParamsGPU {
     var saturation: Float
     var starWeight: Float
     var starD: Float
+    var starShrink: Float
     var shadow0: Float; var shadow1: Float; var shadow2: Float
     var midtone0: Float; var midtone1: Float; var midtone2: Float
     var starShadow0: Float; var starShadow1: Float; var starShadow2: Float
     var starMidtone0: Float; var starMidtone1: Float; var starMidtone2: Float
 
     public init(_ p: EngineParams, auto a: AutoStretch, star s: StarStretch) {
-        denoiseBlend = p.denoiseBlend; blackPoint = p.blackPoint
+        denoiseBlend = p.denoiseBlend; smoothStrength = p.smoothStrength
+        correctionBlend = p.correctionBlend
+        blackPoint = p.blackPoint
         glowD = p.glowD; contrastSP = p.contrastSP
         detailStrength = p.detailStrength; saturation = p.saturation
-        starWeight = p.starWeight; starD = p.starD
+        starWeight = p.starWeight; starD = p.starD; starShrink = p.starShrink
         shadow0 = a.shadow.0; shadow1 = a.shadow.1; shadow2 = a.shadow.2
         midtone0 = a.midtone.0; midtone1 = a.midtone.1; midtone2 = a.midtone.2
         starShadow0 = s.shadow.0; starShadow1 = s.shadow.1; starShadow2 = s.shadow.2
@@ -43,31 +48,27 @@ public struct StarStretch {
     public var shadow: (Float, Float, Float)
     public var midtone: (Float, Float, Float)
 
-    public init(base: FITSImage, refPercentile: Float = 0.995, target: Float = 0.55) {
-        func channel(_ c: Int) -> (Float, Float) {
-            var vals: [Float] = []
-            vals.reserveCapacity(base.width * base.height / 16)
-            var i = c
-            let stride = 4 * 4
-            while i < base.rgba.count { vals.append(base.rgba[i]); i += stride }
-            vals.sort()
-            let shadow = max(0, vals[vals.count / 2])                 // background ~0
-            let ref = vals[min(vals.count - 1, Int(Float(vals.count) * refPercentile))]
-            let x0 = (ref - shadow) / max(1 - shadow, 1e-4)
-            let t = target
-            let m = x0 * (1 - t) / max(x0 * (1 - 2 * t) + t, 1e-6)
-            return (shadow, min(max(m, 1e-4), 0.5))
+    public init(base: FITSImage, refPercentile: Float = 0.995, target: Float = 0.48) {
+        var vals: [Float] = []
+        vals.reserveCapacity(base.width * base.height / 16)
+        var i = 0
+        while i < base.rgba.count {
+            vals.append(base.rgba[i] * 0.2126 + base.rgba[i + 1] * 0.7152 + base.rgba[i + 2] * 0.0722)
+            i += 16
         }
-        let (s0, m0) = channel(0)
-        let (s1, m1) = channel(1)
-        let (s2, m2) = channel(2)
-        shadow = (s0, s1, s2)
-        midtone = (m0, m1, m2)
+        vals.sort()
+        let s = max(0, vals[vals.count / 2])
+        let ref = vals[min(vals.count - 1, Int(Float(vals.count) * refPercentile))]
+        let x0 = (ref - s) / max(1 - s, 1e-4)
+        let m = x0 * (1 - target) / max(x0 * (1 - 2 * target) + target, 1e-6)
+        let clamped = min(max(m, 1e-4), 0.5)
+        shadow = (s, s, s)
+        midtone = (clamped, clamped, clamped)
     }
 }
 
 /// Blit params — field order MUST match `BlitUniforms` in the shader source.
-struct BlitUniforms { var divider: Float; var compare: Float }
+struct BlitUniforms { var divider: Float; var compare: Float; var clipping: Float }
 
 /// Per-channel auto base stretch (black point + MTF midtone) from image
 /// statistics, mirroring Siril's autostretch: shadow = median − 2.8·σ (via MAD),
@@ -77,29 +78,117 @@ public struct AutoStretch {
     public var shadow: (Float, Float, Float)
     public var midtone: (Float, Float, Float)
 
-    public init(base: FITSImage, targetBG: Float = 0.12) {
-        func channel(_ c: Int) -> (Float, Float) {
+    public init(base: FITSImage, targetBG: Float = 0.15) {
+        func parameters(channel: Int) -> (Float, Float) {
             var vals: [Float] = []
             vals.reserveCapacity(base.width * base.height / 16)
-            var i = c
-            let stride = 4 * 4                 // every 4th pixel, ×4 floats/px
-            while i < base.rgba.count { vals.append(base.rgba[i]); i += stride }
+            var i = channel
+            while i < base.rgba.count {
+                let v = base.rgba[i]
+                if v > 1e-7 && v.isFinite { vals.append(v) }
+                i += 16
+            }
+            if vals.isEmpty { vals = [0, 1e-4] }
             vals.sort()
             let median = vals[vals.count / 2]
-            var dev = vals.map { abs($0 - median) }
-            dev.sort()
+            var dev = vals.map { abs($0 - median) }; dev.sort()
             let sigma = 1.4826 * dev[dev.count / 2]
-            let shadow = max(0, median - 2.8 * sigma)
-            let x0 = (median - shadow) / max(1 - shadow, 1e-4)
-            let t = targetBG
-            let m = x0 * (1 - t) / max(x0 * (1 - 2 * t) + t, 1e-6)
-            return (shadow, min(max(m, 1e-4), 0.5))
+            let s = max(0, median - 2.8 * sigma)
+            let x0 = (median - s) / max(1 - s, 1e-4)
+            let m = x0 * (1 - targetBG) / max(x0 * (1 - 2 * targetBG) + targetBG, 1e-6)
+            return (s, min(max(m, 1e-4), 0.5))
         }
-        let (s0, m0) = channel(0)
-        let (s1, m1) = channel(1)
-        let (s2, m2) = channel(2)
-        shadow = (s0, s1, s2)
-        midtone = (m0, m1, m2)
+        let r = parameters(channel: 0), g = parameters(channel: 1), b = parameters(channel: 2)
+        shadow = (r.0, g.0, b.0)
+        midtone = (r.1, g.1, b.1)
+    }
+}
+
+public struct ImageRegion: Equatable, Sendable {
+    public let x, y, width, height: Int
+    public init(x: Int, y: Int, width: Int, height: Int) {
+        self.x = x; self.y = y; self.width = width; self.height = height
+    }
+}
+
+/// Conservative subject-aware framing for compact deep-sky targets. It works on
+/// a tiny averaged grid, so stars/noise contribute far less than extended signal.
+/// The crop never goes below 58% of the sensor frame and remains reversible
+/// because the cached FITS layers stay full-size.
+public enum AutoCrop {
+    public static func region(for image: FITSImage) -> ImageRegion {
+        let full = ImageRegion(x: 0, y: 0, width: image.width, height: image.height)
+        guard image.width >= 320, image.height >= 320 else { return full }
+        let long = max(image.width, image.height)
+        let gw = max(20, image.width * 64 / long), gh = max(20, image.height * 64 / long)
+        var grid = [Float](repeating: 0, count: gw*gh)
+        var counts = [Int](repeating: 0, count: gw*gh)
+        for y in stride(from: 0, to: image.height, by: 2) {
+            let gy = min(gh-1, y*gh/image.height)
+            for x in stride(from: 0, to: image.width, by: 2) {
+                let gx = min(gw-1, x*gw/image.width), p = (y*image.width+x)*4
+                grid[gy*gw+gx] += image.rgba[p]*0.2126 + image.rgba[p+1]*0.7152 + image.rgba[p+2]*0.0722
+                counts[gy*gw+gx] += 1
+            }
+        }
+        for i in grid.indices { grid[i] /= Float(max(counts[i], 1)) }
+        func blurred(_ src: [Float], radius: Int) -> [Float] {
+            var out = src
+            for y in 0..<gh { for x in 0..<gw {
+                var sum: Float = 0; var n: Float = 0
+                for dy in -radius...radius { for dx in -radius...radius {
+                    let yy=min(max(y+dy,0),gh-1), xx=min(max(x+dx,0),gw-1)
+                    sum += src[yy*gw+xx]; n += 1
+                } }
+                out[y*gw+x] = sum/n
+            } }
+            return out
+        }
+        grid = blurred(grid, radius: 2)
+        let sorted = grid.sorted(), median = sorted[sorted.count/2]
+        let deviations = grid.map { abs($0-median) }.sorted()
+        let sigma = max(1.4826 * deviations[deviations.count/2], 1e-6)
+        let xr = (gw*15/100)..<(gw*85/100), yr = (gh*15/100)..<(gh*85/100)
+        var peak: Float = 0, bestScore: Float = -.greatestFiniteMagnitude
+        var peakX = gw/2, peakY = gh/2
+        for y in yr { for x in xr {
+            let nx=(Float(x)+0.5)/Float(gw)-0.5, ny=(Float(y)+0.5)/Float(gh)-0.5
+            // Seestar centres the selected target. This prior prevents a single
+            // saturated field star from winning over extended central signal.
+            let score=(grid[y*gw+x]-median)/(1 + 30*(nx*nx+ny*ny))
+            if score > bestScore { bestScore=score; peak=grid[y*gw+x]; peakX=x; peakY=y }
+        } }
+        guard peak > median + 6*sigma else { return full }
+        let threshold = median + max(3*sigma, (peak-median)*0.30)
+        var minX=peakX, maxX=peakX, minY=peakY, maxY=peakY, selected=0
+        // Flood only the connected extended signal around the primary peak;
+        // unrelated field stars must not expand the crop back to the full frame.
+        var seen = [Bool](repeating: false, count: gw*gh)
+        var queue = [(peakX, peakY)], head = 0
+        seen[peakY*gw+peakX] = true
+        while head < queue.count {
+            let (x,y)=queue[head]; head += 1
+            guard grid[y*gw+x] >= threshold else { continue }
+            minX=min(minX,x); maxX=max(maxX,x); minY=min(minY,y); maxY=max(maxY,y); selected += 1
+            for dy in -1...1 { for dx in -1...1 where dx != 0 || dy != 0 {
+                let xx=x+dx, yy=y+dy
+                if xx>=0 && xx<gw && yy>=0 && yy<gh && !seen[yy*gw+xx] {
+                    seen[yy*gw+xx]=true; queue.append((xx,yy))
+                }
+            } }
+        }
+        guard selected >= 4 else { return full }
+        let signalScale = max(Float(maxX-minX+1)/Float(gw), Float(maxY-minY+1)/Float(gh))
+        let scale = min(1, max(0.58, signalScale * 2.2))
+        guard scale < 0.94 else { return full }
+        let cw = max(1, Int(Float(image.width)*scale)), ch = max(1, Int(Float(image.height)*scale))
+        let targetX = (Float(peakX)+0.5)/Float(gw)*Float(image.width)
+        let targetY = (Float(peakY)+0.5)/Float(gh)*Float(image.height)
+        let cx = targetX*0.8 + Float(image.width)*0.1
+        let cy = targetY*0.8 + Float(image.height)*0.1
+        let x = min(max(Int(cx)-cw/2, 0), image.width-cw)
+        let y = min(max(Int(cy)-ch/2, 0), image.height-ch)
+        return ImageRegion(x: x, y: y, width: cw, height: ch)
     }
 }
 
@@ -107,7 +196,8 @@ public struct AutoStretch {
 /// `LayerBundle` holds the four baked layers resident on the GPU. The SAME
 /// `encodeChain` feeds both the headless PNG export and the live `MTKView`, so
 /// preview == export by construction (design §5).
-public final class ChainRenderer {
+public final class ChainRenderer: @unchecked Sendable {
+    public static let outputColorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
     public let device: MTLDevice
     let queue: MTLCommandQueue
     let processPipeline: MTLComputePipelineState
@@ -139,17 +229,17 @@ public final class ChainRenderer {
 
     /// Four baked layers uploaded to `MTLTexture`s and kept resident, plus the
     /// intermediate/output textures and the cached auto stretch.
-    public final class LayerBundle {
-        let master, denoised, starless, stars: MTLTexture
+    public final class LayerBundle: @unchecked Sendable {
+        let master, corrected, denoised, starless, stars: MTLTexture
         let nebTex, outTex, beforeTex: MTLTexture
         public let width: Int, height: Int
         let auto: AutoStretch
         let star: StarStretch
-        init(master: MTLTexture, denoised: MTLTexture, starless: MTLTexture,
+        init(master: MTLTexture, corrected: MTLTexture, denoised: MTLTexture, starless: MTLTexture,
              stars: MTLTexture, nebTex: MTLTexture, outTex: MTLTexture,
              beforeTex: MTLTexture, width: Int, height: Int,
              auto: AutoStretch, star: StarStretch) {
-            self.master = master; self.denoised = denoised
+            self.master = master; self.corrected = corrected; self.denoised = denoised
             self.starless = starless; self.stars = stars
             self.nebTex = nebTex; self.outTex = outTex; self.beforeTex = beforeTex
             self.width = width; self.height = height; self.auto = auto; self.star = star
@@ -175,15 +265,30 @@ public final class ChainRenderer {
         return device.makeTexture(descriptor: d)!
     }
 
-    public func makeBundle(master: FITSImage, denoised: FITSImage,
-                           starless: FITSImage, stars: FITSImage) -> LayerBundle {
+    public func makeBundle(master originalMaster: FITSImage, corrected originalCorrected: FITSImage? = nil,
+                           denoised originalDenoised: FITSImage,
+                           starless originalStarless: FITSImage, stars originalStars: FITSImage,
+                           profile: Profile? = nil) -> LayerBundle {
+        let correctedInput = originalCorrected ?? originalMaster
+        let sameSize = [correctedInput, originalDenoised, originalStarless, originalStars].allSatisfy {
+            $0.width == originalMaster.width && $0.height == originalMaster.height
+        }
+        let region = sameSize && profile != .starCluster
+            ? AutoCrop.region(for: originalDenoised)
+            : ImageRegion(x: 0, y: 0, width: originalMaster.width, height: originalMaster.height)
+        let master = originalMaster.cropped(x: region.x, y: region.y, width: region.width, height: region.height)
+        let corrected = correctedInput.cropped(x: region.x, y: region.y, width: region.width, height: region.height)
+        let denoised = originalDenoised.cropped(x: region.x, y: region.y, width: region.width, height: region.height)
+        let starless = originalStarless.cropped(x: region.x, y: region.y, width: region.width, height: region.height)
+        let stars = originalStars.cropped(x: region.x, y: region.y, width: region.width, height: region.height)
         let (w, h) = (master.width, master.height)
-        let auto = AutoStretch(base: starless), star = StarStretch(base: stars)
+        let auto = AutoStretch(base: master), star = StarStretch(base: stars)
         let masterTex = upload(master)
         // outTex/beforeTex are mipmapped so the fit-to-window preview downsamples
         // faithfully (faint stars survive); the compute writes mip 0.
         let bundle = LayerBundle(
-            master: masterTex, denoised: upload(denoised),
+            master: masterTex, corrected: upload(corrected),
+            denoised: upload(denoised),
             starless: upload(starless), stars: upload(stars),
             nebTex: scratch(w, h), outTex: scratch(w, h, mipmapped: true),
             beforeTex: scratch(w, h, mipmapped: true),
@@ -219,7 +324,7 @@ public final class ChainRenderer {
 
         let e1 = cmd.makeComputeCommandEncoder()!
         e1.setComputePipelineState(processPipeline)
-        e1.setTextures([b.master, b.denoised, b.starless, b.nebTex], range: 0..<4)
+        e1.setTextures([b.master, b.corrected, b.denoised, b.starless, b.nebTex], range: 0..<5)
         e1.setBytes(&u, length: MemoryLayout<EngineParamsGPU>.stride, index: 0)
         e1.dispatchThreadgroups(grid, threadsPerThreadgroup: tpg)
         e1.endEncoding()
@@ -234,8 +339,9 @@ public final class ChainRenderer {
 
     /// Live path: render the chain result into the view's drawable every frame.
     /// Slider input only mutates `params`; the loop always draws current params.
-    public func draw(bundle: LayerBundle, params: EngineParams,
-                     compare: Bool = false, divider: Float = 0.5, in view: MTKView) {
+    @MainActor public func draw(bundle: LayerBundle, params: EngineParams,
+                     compare: Bool = false, divider: Float = 0.5,
+                     clipping: Bool = false, in view: MTKView) {
         guard let drawable = view.currentDrawable,
               let rpd = view.currentRenderPassDescriptor else { return }
         let cmd = queue.makeCommandBuffer()!
@@ -246,7 +352,8 @@ public final class ChainRenderer {
             blit.generateMipmaps(for: bundle.outTex)
             blit.endEncoding()
         }
-        var bu = BlitUniforms(divider: divider, compare: compare ? 1 : 0)
+        var bu = BlitUniforms(divider: divider, compare: compare ? 1 : 0,
+                              clipping: clipping ? 1 : 0)
         let enc = cmd.makeRenderCommandEncoder(descriptor: rpd)!
         enc.setRenderPipelineState(blitPipeline)
         enc.setFragmentTexture(bundle.outTex, index: 0)
@@ -270,6 +377,24 @@ public final class ChainRenderer {
         return try downscaled(bundle.outTex, maxDimension: maxDimension)
     }
 
+    /// 8-bit sRGB CGImage from a float image — the display path for AI results
+    /// shown live in the app (the PNG export path stays 16-bit).
+    public static func displayImage(_ image: FITSImage) throws -> CGImage {
+        let (w, h) = (image.width, image.height)
+        var px = [UInt8](repeating: 255, count: w * h * 4)
+        for i in 0..<(w * h) {
+            for c in 0..<3 {
+                px[i*4+c] = UInt8((max(0, min(1, image.rgba[i*4+c])) * 255).rounded())
+            }
+        }
+        let info = CGImageAlphaInfo.premultipliedLast.rawValue
+        guard let cg = px.withUnsafeMutableBytes({ raw -> CGImage? in
+            CGContext(data: raw.baseAddress, width: w, height: h, bitsPerComponent: 8,
+                      bytesPerRow: w * 4, space: outputColorSpace, bitmapInfo: info)?.makeImage()
+        }) else { throw Err.msg("display CGContext failed") }
+        return cg
+    }
+
     /// Read an RGBA32F texture back and produce a downscaled 8-bit sRGB CGImage.
     private func downscaled(_ tex: MTLTexture, maxDimension: Int) throws -> CGImage {
         let (w, h) = (tex.width, tex.height)
@@ -284,7 +409,7 @@ public final class ChainRenderer {
                 px[i*4+c] = UInt8((max(0, min(1, floats[i*4+c])) * 255).rounded())
             }
         }
-        let cs = CGColorSpace(name: CGColorSpace.sRGB)!
+        let cs = Self.outputColorSpace
         let info = CGImageAlphaInfo.premultipliedLast.rawValue
         guard let full = px.withUnsafeMutableBytes({ raw -> CGImage? in
             CGContext(data: raw.baseAddress, width: w, height: h, bitsPerComponent: 8,
@@ -305,24 +430,50 @@ public final class ChainRenderer {
     }
 
     /// Headless export: run the chain and write a PNG (the CLI path).
-    public func renderPNG(bundle: LayerBundle, params: EngineParams, to url: URL) throws {
+    public func renderPNG(bundle: LayerBundle, params: EngineParams, scale: Int = 1, to url: URL) throws {
         let cmd = queue.makeCommandBuffer()!
         encodeChain(cmd, params, bundle)
         cmd.commit(); cmd.waitUntilCompleted()
         if let err = cmd.error { throw Err.msg("GPU: \(err)") }
-        try writePNG(bundle.outTex, to: url)
+        try writePNG(bundle.outTex, scale: min(max(scale, 1), 2), to: url)
+    }
+
+    /// Render the display-referred floating-point result for an additional
+    /// export-only processor such as AI super-resolution.
+    public func renderImage(bundle: LayerBundle, params: EngineParams) throws -> FITSImage {
+        let cmd = queue.makeCommandBuffer()!
+        encodeChain(cmd, params, bundle)
+        cmd.commit(); cmd.waitUntilCompleted()
+        if let err = cmd.error { throw Err.msg("GPU: \(err)") }
+        let (w, h) = (bundle.outTex.width, bundle.outTex.height)
+        var floats = [Float](repeating: 0, count: w * h * 4)
+        floats.withUnsafeMutableBytes { raw in
+            bundle.outTex.getBytes(raw.baseAddress!, bytesPerRow: w * 16,
+                                   from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
+        }
+        return FITSImage(width: w, height: h, channels: 3, rgba: floats)
+    }
+
+    public func writePNG(_ image: FITSImage, to url: URL) throws {
+        try writePNG(width: image.width, height: image.height, floats: image.rgba,
+                     scale: 1, to: url)
     }
 
     /// Write the float result as a 16-bit PNG (design §5: high-precision export,
     /// no 8-bit banding). The RGBA32F values quantise to 16-bit cleanly, so no
     /// dithering is needed — 16 bits has no visible banding in deep-sky gradients.
-    private func writePNG(_ tex: MTLTexture, to url: URL) throws {
+    private func writePNG(_ tex: MTLTexture, scale: Int, to url: URL) throws {
         let (w, h) = (tex.width, tex.height)
         var floats = [Float](repeating: 0, count: w * h * 4)
         floats.withUnsafeMutableBytes { raw in
             tex.getBytes(raw.baseAddress!, bytesPerRow: w * 16,
                          from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
         }
+        try writePNG(width: w, height: h, floats: floats, scale: scale, to: url)
+    }
+
+    private func writePNG(width w: Int, height h: Int, floats: [Float],
+                          scale: Int, to url: URL) throws {
         var px = [UInt16](repeating: 0xFFFF, count: w * h * 4)
         for i in 0..<(w * h) {
             for c in 0..<3 {
@@ -336,12 +487,28 @@ public final class ChainRenderer {
             CGContext(data: raw.baseAddress, width: w, height: h, bitsPerComponent: 16,
                       bytesPerRow: w * 8, space: cs, bitmapInfo: info)
         }
-        guard let ctx, let image = ctx.makeImage() else { throw Err.msg("CGContext failed") }
+        guard let ctx, let nativeImage = ctx.makeImage() else { throw Err.msg("CGContext failed") }
+        let image: CGImage
+        if scale == 1 {
+            image = nativeImage
+        } else {
+            let sw = w * scale, sh = h * scale
+            guard let scaled = CGContext(data: nil, width: sw, height: sh,
+                                         bitsPerComponent: 16, bytesPerRow: 0,
+                                         space: cs, bitmapInfo: info) else {
+                throw Err.msg("scaled export CGContext failed")
+            }
+            scaled.interpolationQuality = .high
+            scaled.draw(nativeImage, in: CGRect(x: 0, y: 0, width: sw, height: sh))
+            guard let made = scaled.makeImage() else { throw Err.msg("scaled export failed") }
+            image = made
+        }
         guard let dest = CGImageDestinationCreateWithURL(
             url as CFURL, UTType.png.identifier as CFString, 1, nil) else {
             throw Err.msg("cannot create PNG at \(url.path)")
         }
-        CGImageDestinationAddImage(dest, image, nil)
+        let properties = [kCGImagePropertyProfileName: "sRGB IEC61966-2.1"] as CFDictionary
+        CGImageDestinationAddImage(dest, image, properties)
         guard CGImageDestinationFinalize(dest) else { throw Err.msg("PNG write failed") }
     }
 }

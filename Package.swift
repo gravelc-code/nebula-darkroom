@@ -67,16 +67,28 @@ let package = Package(
         ),
         .executableTarget(
             name: "NebulaRender",
-            dependencies: ["NebulaCore", "NebulaEngine"]
+            dependencies: ["NebulaCore", "NebulaEngine", "NebulaAI"]
         ),
         .executableTarget(
             name: "NebulaApp",
-            dependencies: ["NebulaCore", "NebulaEngine", "NebulaBake"]
+            dependencies: ["NebulaCore", "NebulaEngine", "NebulaBake", "NebulaAI"]
         ),
         .testTarget(
             name: "NebulaCoreTests",
             dependencies: ["NebulaCore"],
             resources: [.copy("Fixtures")]
+        ),
+        .testTarget(
+            name: "NebulaEngineTests",
+            dependencies: ["NebulaEngine"]
+        ),
+        .testTarget(
+            name: "NebulaBakeTests",
+            dependencies: ["NebulaBake", "NebulaEngine"]
+        ),
+        .testTarget(
+            name: "NebulaAITests",
+            dependencies: ["NebulaAI"]
         )
     ]
 )

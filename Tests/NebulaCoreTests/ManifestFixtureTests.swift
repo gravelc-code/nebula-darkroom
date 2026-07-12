@@ -35,7 +35,8 @@ final class ManifestFixtureTests: XCTestCase {
         XCTAssertEqual(manifest.look.percent(.stars), 65)
 
         // Every emitted layer resolves and carries dimensions.
-        for kind in BakedLayer.allCases {
+        // Legacy v1 manifests predate the optional reversible correction layer.
+        for kind in [BakedLayer.master, .denoised, .starless, .stars] {
             let ref = try XCTUnwrap(manifest.layer(kind))
             XCTAssertEqual(ref.format, .fits)
             XCTAssertGreaterThan(ref.width, 0)

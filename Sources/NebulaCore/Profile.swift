@@ -21,30 +21,9 @@ public enum Profile: String, CaseIterable, Codable, Sendable {
     /// A starting point the user then refines; all four begin from `Auto` and
     /// nudge toward what each target type usually wants.
     public var initialLook: LookState {
-        var look = Preset.auto.look
-        switch self {
-        case .galaxy:
-            // Compact object: restrained glow, tighter stars, cleaner background.
-            look[.glow] = 0.52
-            look[.stars] = 0.55
-            look[.starSize] = 0.40
-            look[.background] = 0.60
-        case .broadbandNebula:
-            // Balanced default — closest to Auto.
-            break
-        case .narrowbandDuoband:
-            // Duo-band: push colour and glow, hold stars back so nebulosity sings.
-            look[.colour] = 0.68
-            look[.glow] = 0.66
-            look[.stars] = 0.50
-        case .starCluster:
-            // Stars are the subject: bright, present stars; gentle background.
-            look[.stars] = 0.78
-            look[.starSize] = 0.55
-            look[.glow] = 0.45
-            look[.colour] = 0.48
-        }
-        return look
+        // Target classification must not silently alter pixels. Profiles remain
+        // useful metadata, while Auto always opens on the preserved master.
+        Preset.auto.look
     }
 
     /// Best-guess profile from Seestar FITS header hints. Broadband nebula is the
@@ -59,6 +38,19 @@ public enum Profile: String, CaseIterable, Codable, Sendable {
 
         if o.contains("galaxy") { return .galaxy }
         if o.contains("cluster") { return .starCluster }
+        // Seestar normally puts a catalogue name ("M 83"), not an object type,
+        // in OBJECT. Cover the Messier catalogue locally so Auto is useful
+        // without a network lookup.
+        let compact = o.uppercased().replacingOccurrences(of: " ", with: "")
+        if compact.first == "M", let n = Int(compact.dropFirst()) {
+            let galaxies: Set<Int> = [31,32,33,49,51,58,59,60,61,63,64,65,66,74,77,
+                                      81,82,83,84,85,86,87,88,89,90,91,94,95,96,98,99,
+                                      100,101,102,104,105,106,108,109,110]
+            let nebulae: Set<Int> = [1,8,16,17,20,27,42,43,57,76,78,97]
+            if galaxies.contains(n) { return .galaxy }
+            if nebulae.contains(n) { return .broadbandNebula }
+            if (2...110).contains(n) { return .starCluster }
+        }
         if f.contains("duo") || f.contains("narrow") || f.contains("ha") || f.contains("oiii") {
             return .narrowbandDuoband
         }
