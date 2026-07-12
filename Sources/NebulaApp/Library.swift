@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 Nebula contributors
 import Foundation
+import NebulaCore
+import NebulaBake
 
 /// A previously-developed target sitting in the bake cache. The Library grid
 /// (design §6, "a photo app") lists these so re-opening is one tap — the bake is
@@ -10,9 +12,17 @@ struct CachedTarget: Identifiable, Hashable {
     let dir: URL              // the bake dir (holds master/denoised/starless/stars)
     let modified: Date        // newest layer mtime → sort most-recent first
     let sourceSubs: URL?      // the subs folder it was baked from, if still known
+    let pipelineVersion: Int? // bake pipeline version from the manifest, if known
 
     var id: String { dir.path }
     var thumbURL: URL { dir.appendingPathComponent("thumb.png") }
+
+    /// This target was baked by an older pipeline, so a re-develop would produce
+    /// better layers (e.g. tighter stars). Only actionable when we still know its
+    /// subs folder. Drives the "Update" badge in the grid.
+    var needsRedevelop: Bool {
+        sourceSubs != nil && (pipelineVersion ?? 0) < Baker.pipelineVersion
+    }
 }
 
 enum Library {
@@ -36,8 +46,10 @@ enum Library {
                                       encoding: .utf8))
                 .map { URL(fileURLWithPath: $0.trimmingCharacters(in: .whitespacesAndNewlines)) }
                 .flatMap { fm.fileExists(atPath: $0.path) ? $0 : nil }
+            let version = (try? Data(contentsOf: dir.appendingPathComponent("manifest.json")))
+                .flatMap { try? Manifest(jsonData: $0) }?.pipelineVersion
             return CachedTarget(name: dir.lastPathComponent, dir: dir,
-                                modified: modified, sourceSubs: source)
+                                modified: modified, sourceSubs: source, pipelineVersion: version)
         }
         .sorted { $0.modified > $1.modified }
     }

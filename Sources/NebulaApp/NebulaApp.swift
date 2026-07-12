@@ -733,6 +733,20 @@ struct LibraryCard: View {
                 .clipShape(RoundedRectangle(cornerRadius: 12))
                 .overlay(RoundedRectangle(cornerRadius: 12)
                     .strokeBorder(.white.opacity(0.08), lineWidth: 1))
+                .overlay(alignment: .topTrailing) {
+                    if target.needsRedevelop {
+                        Button { model.redevelop(target) } label: {
+                            Label("Update", systemImage: "arrow.triangle.2.circlepath")
+                                .font(.caption2.weight(.bold))
+                                .padding(.horizontal, 8).padding(.vertical, 4)
+                                .background(Color.accentColor, in: Capsule())
+                                .foregroundStyle(.white)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(8)
+                        .help("Re-develop with the latest pipeline (tighter stars, halo fix)")
+                    }
+                }
 
             Text(target.name)
                 .font(.callout).foregroundStyle(.white.opacity(0.9))

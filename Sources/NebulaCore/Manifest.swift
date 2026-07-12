@@ -103,6 +103,16 @@ public struct Manifest: Codable, Equatable, Sendable {
         layers.first { $0.layer == kind }
     }
 
+    /// The bake pipeline version this target was produced with, parsed from the
+    /// `pipeline-vN` stage outcome. `nil` means a pre-versioned (very old) bake.
+    /// The app compares this to `Baker.pipelineVersion` to flag stale targets.
+    public var pipelineVersion: Int? {
+        for outcome in stageOutcomes where outcome.stage.hasPrefix("pipeline-v") {
+            if let n = Int(outcome.stage.dropFirst("pipeline-v".count)) { return n }
+        }
+        return nil
+    }
+
     /// True when all four layers are present — the precondition for Stage B.
     public var hasAllLayers: Bool {
         let present = Set(layers.map(\.layer))

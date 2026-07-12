@@ -12,6 +12,7 @@ public enum Slider: String, CaseIterable, Codable, Sendable {
     case saturation
     case vibrance
     case tint
+    case warmth
     case stars
     case contrast
     case background
@@ -26,6 +27,7 @@ public enum Slider: String, CaseIterable, Codable, Sendable {
         case .saturation: return "Saturation"
         case .vibrance:   return "Vibrance"
         case .tint:       return "Tint"
+        case .warmth:     return "Warmth"
         case .stars:      return "Stars"
         case .contrast:   return "Contrast"
         case .background: return "Background"
@@ -39,7 +41,7 @@ public enum Slider: String, CaseIterable, Codable, Sendable {
     /// the rest are grouped under "Refine".
     public var isAdvanced: Bool {
         switch self {
-        case .glow, .saturation, .vibrance, .tint, .stars:
+        case .glow, .saturation, .vibrance, .tint, .warmth, .stars:
             return false
         default:
             return true
@@ -49,7 +51,7 @@ public enum Slider: String, CaseIterable, Codable, Sendable {
     /// Which baked layer this control ultimately acts on (design §6 table).
     public var actsOn: LayerKind {
         switch self {
-        case .glow, .contrast, .background, .saturation, .vibrance, .tint, .detail:
+        case .glow, .contrast, .background, .saturation, .vibrance, .tint, .warmth, .detail:
             return .starless
         case .starSize:
             return .stars

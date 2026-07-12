@@ -4,6 +4,9 @@ import Foundation
 import NebulaCore
 import NebulaEngine
 import NebulaAI
+import CoreGraphics
+import ImageIO
+import UniformTypeIdentifiers
 
 /// The native Swift bake orchestrator (Phase 3) — replaces the Python
 /// `bake.py` seam. Register + stack via Siril (subprocess, classical DSP stays
@@ -12,6 +15,11 @@ import NebulaAI
 /// manifest. Never a dead end: each stage falls into a good-enough fallback.
 public struct Baker {
     public struct Progress: Sendable { public let fraction: Double; public let status: String }
+
+    /// The current bake pipeline version. Bumped whenever the bake changes in a
+    /// way that improves cached layers (e.g. the star-separation halo fix, the
+    /// StarNet PNG bridge) so the Library can flag older targets for re-develop.
+    public static let pipelineVersion = 7
 
     let denoiseModel: String?
     let bgeModel: String?
@@ -136,7 +144,7 @@ public struct Baker {
         // --- 5. Star separation: real model or classical star-mask fallback ---
         onProgress(Progress(fraction: 0.72, status: "Separating stars…"))
         var starlessHWC: [Float]?
-        if let cmd = starnetCmd ?? ProcessInfo.processInfo.environment["NEBULA_STARNET"] {
+        if let cmd = starnetCmd ?? ProcessInfo.processInfo.environment["NEBULA_STARNET"] ?? Self.discoverStarNet() {
             if let sep = try? runStarSeparation(cmd, masterHWC: correctedHWC, w: w, h: h, c: c, workDir: workDir) {
                 starlessHWC = sep
                 outcomes.append(StageOutcome(stage: "star-separation", succeeded: true))
@@ -185,7 +193,7 @@ public struct Baker {
         // --- 6. Manifest ---------------------------------------------------
         let manifest = Manifest(target: target, look: target.profile.initialLook,
                                 colourMethod: colourMethod, layers: layers,
-                                stageOutcomes: outcomes + [StageOutcome(stage: "pipeline-v6", succeeded: true)])
+                                stageOutcomes: outcomes + [StageOutcome(stage: "pipeline-v\(Self.pipelineVersion)", succeeded: true)])
         try manifest.jsonData().write(to: outDir.appendingPathComponent("manifest.json"))
         onProgress(Progress(fraction: 1.0, status: "Done"))
         return manifest
@@ -263,15 +271,40 @@ public struct Baker {
             && discoverModel("denoise-ai-models", "NEBULA_DENOISE_MODEL") != nil
     }
 
-    /// Run a FITS-in/out star-removal command and return the starless HWC.
+    /// Run a StarNet-style star remover and return the starless HWC in LINEAR
+    /// space. Two impedance mismatches are bridged here:
+    ///   1. StarNet CLIs read TIFF/PNG, not FITS.
+    ///   2. StarNet is trained on *stretched* images; the near-black linear
+    ///      master would hide all but the brightest stars.
+    /// So we apply the same invertible per-channel MTF autostretch the engine
+    /// uses, hand StarNet a 16-bit PNG, then invert the stretch on the returned
+    /// starless — restoring linear space where `stars = master - starless` holds.
+    /// The command template uses `{input}`/`{output}` (now PNG paths), e.g.
+    /// `starnet2 -i {input} -o {output}`.
     private func runStarSeparation(_ template: String, masterHWC: [Float],
                                    w: Int, h: Int, c: Int, workDir: URL) throws -> [Float] {
+        guard c == 3 else {
+            throw NSError(domain: "NebulaBake", code: 3,
+                          userInfo: [NSLocalizedDescriptionKey: "star separation needs RGB"])
+        }
         let fm = FileManager.default
         try fm.createDirectory(at: workDir, withIntermediateDirectories: true)
-        let inURL = workDir.appendingPathComponent("_starnet_in.fits")
-        let outURL = workDir.appendingPathComponent("_starnet_out.fits")
+        let inURL = workDir.appendingPathComponent("_starnet_in.tiff")
+        let outURL = workDir.appendingPathComponent("_starnet_out.tiff")
         try? fm.removeItem(at: outURL)
-        try FITSImage.fromHWC(masterHWC, width: w, height: h, channels: c).write(inURL)
+
+        // Invertible per-channel autostretch (linear → display), matching the
+        // live engine, so StarNet sees a normal-looking astrophoto.
+        let stretch = AutoStretch(base: FITSImage.fromHWC(masterHWC, width: w, height: h, channels: c))
+        let sh = [stretch.shadow.0, stretch.shadow.1, stretch.shadow.2]
+        let mt = [stretch.midtone.0, stretch.midtone.1, stretch.midtone.2]
+        var stretched = [Float](repeating: 0, count: masterHWC.count)
+        for pix in 0..<(w * h) {
+            for ch in 0..<3 {
+                stretched[pix*3+ch] = Self.forwardStretch(masterHWC[pix*3+ch], shadow: sh[ch], midtone: mt[ch])
+            }
+        }
+        try Self.writePNG16(stretched, w: w, h: h, to: inURL)
 
         let cmd = template
             .replacingOccurrences(of: "{input}", with: inURL.path)
@@ -293,12 +326,116 @@ public struct Baker {
             throw NSError(domain: "NebulaBake", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "starnet produced no output"])
         }
-        let image = try FITSImage.read(outURL)
-        guard image.width == w, image.height == h, image.channels == c else {
-            throw NSError(domain: "NebulaBake", code: 2,
-                          userInfo: [NSLocalizedDescriptionKey: "star separator changed image dimensions"])
+        // Invert the stretch so the starless returns to linear space.
+        let starlessStretched = try Self.readPNG16(outURL, w: w, h: h)
+        var out = [Float](repeating: 0, count: masterHWC.count)
+        for pix in 0..<(w * h) {
+            for ch in 0..<3 {
+                out[pix*3+ch] = Self.inverseStretch(starlessStretched[pix*3+ch], shadow: sh[ch], midtone: mt[ch])
+            }
         }
-        return image.hwcPixels()
+        return out
+    }
+
+    /// Locate a StarNet2 CLI so star removal "just works" once the user installs
+    /// it — no `NEBULA_STARNET` needed. Only the modern `starnet2` build
+    /// (Nebulophotos, `-i`/`-o` interface) is auto-wired; other CLIs (different
+    /// argument syntax) use the env override. A GUI app's PATH usually omits
+    /// `/usr/local/bin`, so the common install locations are checked directly.
+    static func discoverStarNet() -> String? {
+        let fm = FileManager.default
+        let candidates = ["/usr/local/bin/starnet2", "/opt/homebrew/bin/starnet2", "/usr/bin/starnet2"]
+        for path in candidates where fm.isExecutableFile(atPath: path) {
+            return "'\(path)' -i {input} -o {output}"
+        }
+        return nil
+    }
+
+    // MARK: - Invertible MTF autostretch (the same closed form the shader uses)
+
+    static func mtf(_ x: Float, _ m: Float) -> Float {
+        let xx = min(max(x, 0), 1), mm = min(max(m, 0.01), 0.99)
+        let d = (2*mm - 1)*xx - mm
+        if abs(d) < 1e-6 { return xx }
+        return min(max(((mm - 1)*xx) / d, 0), 1)
+    }
+    static func forwardStretch(_ x: Float, shadow: Float, midtone: Float) -> Float {
+        let s = max((x - shadow) / max(1 - shadow, 1e-4), 0)
+        return mtf(s, midtone)
+    }
+    static func inverseStretch(_ y: Float, shadow: Float, midtone: Float) -> Float {
+        // The MTF's inverse is the MTF with the complementary midtone.
+        let s = mtf(min(max(y, 0), 1), 1 - midtone)
+        return s * (1 - shadow) + shadow
+    }
+
+    // MARK: - 16-bit PNG bridge for StarNet (RGB, top-row-first)
+
+    /// Encode HWC RGB floats (0…1) as a 16-bit PNG.
+    static func writePNG16(_ rgb: [Float], w: Int, h: Int, to url: URL) throws {
+        var px = [UInt16](repeating: 0, count: w * h * 4)
+        for i in 0..<(w * h) {
+            for ch in 0..<3 { px[i*4+ch] = UInt16(min(max(rgb[i*3+ch], 0), 1) * 65535 + 0.5) }
+            px[i*4+3] = 65535
+        }
+        let data = px.withUnsafeBytes { Data($0) }
+        let cs = CGColorSpace(name: CGColorSpace.linearSRGB) ?? CGColorSpaceCreateDeviceRGB()
+        let info = CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue).union(.byteOrder16Little)
+        guard let provider = CGDataProvider(data: data as CFData),
+              let img = CGImage(width: w, height: h, bitsPerComponent: 16, bitsPerPixel: 64,
+                                bytesPerRow: w * 8, space: cs, bitmapInfo: info, provider: provider,
+                                decode: nil, shouldInterpolate: false, intent: .defaultIntent),
+              let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.tiff.identifier as CFString, 1, nil)
+        else {
+            throw NSError(domain: "NebulaBake", code: 4,
+                          userInfo: [NSLocalizedDescriptionKey: "cannot encode StarNet input"])
+        }
+        CGImageDestinationAddImage(dest, img, nil)
+        guard CGImageDestinationFinalize(dest) else {
+            throw NSError(domain: "NebulaBake", code: 5,
+                          userInfo: [NSLocalizedDescriptionKey: "cannot write StarNet input"])
+        }
+    }
+
+    /// Decode a StarNet output image to HWC RGB floats at the expected size.
+    /// Reads the decoded image's raw samples directly (no CGContext draw, which
+    /// colour-manages and resamples) so the round trip is exact. Handles 16- or
+    /// 8-bit, RGB or RGBA, whatever StarNet emitted.
+    static func readPNG16(_ url: URL, w: Int, h: Int) throws -> [Float] {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let img = CGImageSourceCreateImageAtIndex(src, 0, nil),
+              let provider = img.dataProvider, let raw = provider.data as Data? else {
+            throw NSError(domain: "NebulaBake", code: 6,
+                          userInfo: [NSLocalizedDescriptionKey: "cannot read StarNet output"])
+        }
+        let bpc = img.bitsPerComponent
+        let comps = img.bitsPerPixel / bpc          // 3 (RGB) or 4 (RGBA/RGBX)
+        let rowBytes = img.bytesPerRow
+        let little = img.bitmapInfo.contains(.byteOrder16Little) || img.bitmapInfo.contains(.byteOrder32Little)
+        guard bpc == 16 || bpc == 8, comps >= 3, img.width == w, img.height == h else {
+            throw NSError(domain: "NebulaBake", code: 7,
+                          userInfo: [NSLocalizedDescriptionKey: "unexpected StarNet output format"])
+        }
+        var out = [Float](repeating: 0, count: w * h * 3)
+        raw.withUnsafeBytes { (buf: UnsafeRawBufferPointer) in
+            let base = buf.baseAddress!
+            for y in 0..<h {
+                let row = base + y * rowBytes
+                for x in 0..<w {
+                    for ch in 0..<3 {
+                        let o = (y*w+x)*3+ch
+                        if bpc == 16 {
+                            let p = row.load(fromByteOffset: (x*comps+ch)*2, as: UInt16.self)
+                            out[o] = Float(little ? p : p.byteSwapped) / 65535
+                        } else {
+                            let v = row.load(fromByteOffset: x*comps+ch, as: UInt8.self)
+                            out[o] = Float(v) / 255
+                        }
+                    }
+                }
+            }
+        }
+        return out
     }
 
     // MARK: - Safe fallbacks

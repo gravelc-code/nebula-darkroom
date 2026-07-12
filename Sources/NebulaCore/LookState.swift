@@ -49,7 +49,7 @@ extension LookState {
     /// Colour is neutral (Saturation/Vibrance at the midpoint, Tint neutral).
     public static var neutral: LookState {
         LookState(percent: [.glow: 0, .saturation: 50, .vibrance: 50, .tint: 50,
-                            .stars: 100, .contrast: 50, .background: 0,
+                            .warmth: 50, .stars: 100, .contrast: 50, .background: 0,
                             .detail: 0, .starSize: 50, .denoise: 0])
     }
 
@@ -58,9 +58,13 @@ extension LookState {
     /// faint signal (Glow), cleans the background, enriches colour, and brings in
     /// the multi-scale structure boost (Detail) so nebulosity has depth on open.
     public static var `default`: LookState {
-        LookState(percent: [.glow: 50, .saturation: 58, .vibrance: 60, .tint: 50,
-                            .stars: 62, .contrast: 56, .background: 66,
-                            .detail: 52, .starSize: 45, .denoise: 60])
+        // Star Size sits well below neutral: with a clean StarNet separation the
+        // real star flux tightens to points without artefacts, which is what
+        // makes a Seestar-style result — fat display-ballooned stars were the
+        // biggest gap. Glow/Background/Detail lift and clean the faint target.
+        LookState(percent: [.glow: 60, .saturation: 60, .vibrance: 62, .tint: 50,
+                            .warmth: 54, .stars: 60, .contrast: 58, .background: 72,
+                            .detail: 55, .starSize: 30, .denoise: 60])
     }
 }
 

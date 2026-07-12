@@ -22,6 +22,8 @@ public struct EngineParamsGPU {
     var saturation: Float
     var vibrance: Float
     var tint: Float
+    var warmth: Float
+    var shadowNeutralize: Float
     var starWeight: Float
     var starD: Float
     var starShrink: Float
@@ -37,6 +39,7 @@ public struct EngineParamsGPU {
         glowD = p.glowD; contrastSP = p.contrastSP
         detailStrength = p.detailStrength; structureStrength = p.structureStrength
         saturation = p.saturation; vibrance = p.vibrance; tint = p.tint
+        warmth = p.warmth; shadowNeutralize = p.shadowNeutralize
         starWeight = p.starWeight; starD = p.starD; starShrink = p.starShrink
         shadow0 = a.shadow.0; shadow1 = a.shadow.1; shadow2 = a.shadow.2
         midtone0 = a.midtone.0; midtone1 = a.midtone.1; midtone2 = a.midtone.2
@@ -276,12 +279,11 @@ public final class ChainRenderer: @unchecked Sendable {
                            starless originalStarless: FITSImage, stars originalStars: FITSImage,
                            profile: Profile? = nil) -> LayerBundle {
         let correctedInput = originalCorrected ?? originalMaster
-        let sameSize = [correctedInput, originalDenoised, originalStarless, originalStars].allSatisfy {
-            $0.width == originalMaster.width && $0.height == originalMaster.height
-        }
-        let region = sameSize && profile != .starCluster
-            ? AutoCrop.region(for: originalDenoised)
-            : ImageRegion(x: 0, y: 0, width: originalMaster.width, height: originalMaster.height)
+        // No auto-crop: always present the full stacked frame (the Seestar keeps
+        // the whole field, and cropping into the subject threw away the surrounding
+        // starfield). The cached FITS layers are full-size regardless.
+        _ = profile
+        let region = ImageRegion(x: 0, y: 0, width: originalMaster.width, height: originalMaster.height)
         let master = originalMaster.cropped(x: region.x, y: region.y, width: region.width, height: region.height)
         let corrected = correctedInput.cropped(x: region.x, y: region.y, width: region.width, height: region.height)
         let denoised = originalDenoised.cropped(x: region.x, y: region.y, width: region.width, height: region.height)

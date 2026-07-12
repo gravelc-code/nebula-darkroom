@@ -12,8 +12,8 @@ import Foundation
 /// lerp(starless, denoisedStarless, denoiseBlend) + starFlux·starWeight
 ///   → blackPoint(blackPoint)
 ///   → ghs(D: glowD, SP: contrastSP)
-///   → saturation → vibrance → tint(green↔magenta)
-///   → bilateral(smoothStrength)
+///   → saturation → vibrance → tint(green↔magenta) → warmth(blue↔amber)
+///   → shadowNeutralize → bilateral(smoothStrength)
 ///   → localContrast(detailStrength) + structureBoost(structureStrength)
 ///   → screen(image, starLayerBloom(starD) · starWeight)   // Star Size only
 /// ```
@@ -53,6 +53,14 @@ public struct EngineParams: Equatable, Sendable {
     /// Green↔magenta tint, `0.5` neutral. Below suppresses green harder (toward
     /// magenta); above restores and adds green. Drives the SCNR green balance.
     public var tint: Float
+    /// Warmth (blue↔amber white balance), `0` cool … `1` warm, `0.5` neutral.
+    /// The second white-balance axis alongside Tint: corrects the residual blue
+    /// cast heavy red light-pollution leaves in the faint end after calibration.
+    public var warmth: Float
+    /// How strongly to pull deep-shadow colour toward neutral grey. Faint-signal
+    /// colour is noise-dominated, so a gentle always-on neutralisation removes the
+    /// blue-green shadow cast without touching real colour above the noise floor.
+    public var shadowNeutralize: Float
     /// Star layer presence in the final screen recombine.
     public var starWeight: Float
     /// GHS strength (D) applied to the star layer — controls apparent star size.
@@ -112,6 +120,11 @@ public struct EngineParams: Equatable, Sendable {
         saturation = sat * 2.0
         vibrance = 1.0 + (vib - 0.5) * 1.6
         tint = Float(look[.tint])
+        warmth = Float(look[.warmth])
+        // Always-on gentle shadow neutralisation, lifted a little more as the user
+        // cleans the Background — deep-shadow colour is noise, and neutralising it
+        // removes the residual blue-green cast without draining real signal colour.
+        shadowNeutralize = 0.55 + background * 0.35
 
         // Stars recombine weight; Star Size is bidirectional around a neutral
         // midpoint: below 50 tightens the real star flux (shrink), above 50

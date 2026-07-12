@@ -64,6 +64,8 @@ struct Uniforms {
     float saturation;
     float vibrance;
     float tint;
+    float warmth;
+    float shadowNeutralize;
     float starWeight;
     float starD;
     float starShrink;
@@ -276,6 +278,21 @@ kernel void processNebula(texture2d<float, access::read>  master   [[texture(0)]
     float scnr = clamp(0.7 - tg, 0.0, 1.0);
     neb.g = mix(neb.g, min(neb.g, max(neb.r, neb.b)), scnr);
     if (tg > 0.0) neb.g = neb.g * (1.0 + tg * 0.35);
+
+    // Warmth: the second white-balance axis (blue↔amber). Warm lifts red and
+    // trims blue; cool the reverse. Corrects the residual blue the calibration
+    // leaves after neutralising heavy red light-pollution.
+    float wm = (u.warmth - 0.5) * 2.0;                  // -1 cool .. +1 warm
+    neb.r = max(neb.r * (1.0 + wm * 0.28), 0.0);
+    neb.b = max(neb.b * (1.0 - wm * 0.28), 0.0);
+
+    // Shadow neutralisation: faint-signal colour is noise, so a blue-green cast
+    // pools in the deep shadows once Glow lifts them. Fade chroma toward neutral
+    // grey below ~12% luminance — real colour above the noise floor is untouched.
+    float nlum = luminance(neb);
+    float sw = clamp((0.12 - nlum) / 0.10, 0.0, 1.0) * clamp(u.shadowNeutralize, 0.0, 1.0);
+    neb = mix(neb, float3(nlum), sw);
+
     neb = protectHighlights(neb);
 
     outNeb.write(float4(neb, 1.0), gid);

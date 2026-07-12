@@ -5,10 +5,10 @@ import XCTest
 
 final class SliderTests: XCTestCase {
     func testHeadlineAndAdvancedSplit() {
-        XCTAssertEqual(Slider.headline, [.glow, .saturation, .vibrance, .tint, .stars])
+        XCTAssertEqual(Slider.headline, [.glow, .saturation, .vibrance, .tint, .warmth, .stars])
         XCTAssertEqual(Set(Slider.advanced),
                        [.contrast, .background, .detail, .starSize, .denoise])
-        XCTAssertEqual(Slider.allCases.count, 10)
+        XCTAssertEqual(Slider.allCases.count, 11)
     }
 
     func testActsOnMapping() {
@@ -64,6 +64,7 @@ final class CanonicalLookTests: XCTestCase {
         XCTAssertEqual(n.percent(.saturation), 50)     // colour trio all neutral
         XCTAssertEqual(n.percent(.vibrance), 50)
         XCTAssertEqual(n.percent(.tint), 50)
+        XCTAssertEqual(n.percent(.warmth), 50)
         XCTAssertEqual(n.percent(.stars), 100)
         XCTAssertEqual(n.percent(.background), 0)
         XCTAssertEqual(n.percent(.detail), 0)
@@ -113,6 +114,7 @@ final class EngineParamsTests: XCTestCase {
         XCTAssertEqual(p.saturation, 1.0, accuracy: 1e-6)   // 0.5 → truthful colour
         XCTAssertEqual(p.vibrance, 1.0, accuracy: 1e-6)
         XCTAssertEqual(p.tint, 0.5, accuracy: 1e-6)         // green↔magenta neutral
+        XCTAssertEqual(p.warmth, 0.5, accuracy: 1e-6)       // blue↔amber neutral
         XCTAssertEqual(p.glowD, 1.75, accuracy: 1e-6)
         XCTAssertEqual(p.blackPoint, 0, accuracy: 1e-6)
         XCTAssertEqual(p.starWeight, 0.5, accuracy: 1e-6)
@@ -132,6 +134,8 @@ final class EngineParamsTests: XCTestCase {
         XCTAssertEqual(p.saturation, 1, accuracy: 1e-6)
         XCTAssertEqual(p.vibrance, 1, accuracy: 1e-6)
         XCTAssertEqual(p.tint, 0.5, accuracy: 1e-6)
+        XCTAssertEqual(p.warmth, 0.5, accuracy: 1e-6)
+        XCTAssertEqual(p.shadowNeutralize, 0.55, accuracy: 1e-6)  // background=0 baseline
         XCTAssertEqual(p.starWeight, 1, accuracy: 1e-6)
         XCTAssertEqual(p.starD, 0, accuracy: 1e-6)
         XCTAssertEqual(p.starShrink, 0, accuracy: 1e-6)
@@ -172,6 +176,8 @@ final class EngineParamsTests: XCTestCase {
         XCTAssertEqual(p.saturation, 2.0, accuracy: 1e-6)
         XCTAssertEqual(p.vibrance, 1.8, accuracy: 1e-6)
         XCTAssertEqual(p.tint, 1.0, accuracy: 1e-6)
+        XCTAssertEqual(p.warmth, 1.0, accuracy: 1e-6)
+        XCTAssertEqual(p.shadowNeutralize, 0.9, accuracy: 1e-6)   // 0.55 + 1.0*0.35
         XCTAssertEqual(p.detailStrength, 0.7, accuracy: 1e-6)
         XCTAssertEqual(p.structureStrength, 1.6, accuracy: 1e-6)
         XCTAssertEqual(p.glowD, 3.5, accuracy: 1e-6)

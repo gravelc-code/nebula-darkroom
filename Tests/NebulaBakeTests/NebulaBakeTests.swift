@@ -5,6 +5,33 @@ import XCTest
 import NebulaEngine
 
 final class NebulaBakeTests: XCTestCase {
+    func testStarNetStretchRoundTripsAndPNGBridgeIsLossless() throws {
+        // The StarNet hook stretches linear→display, hands StarNet a 16-bit PNG,
+        // then inverts the stretch. Both halves must round-trip: otherwise the
+        // starless comes back wrong and stars = master - starless is garbage.
+        let shadow: Float = 0.002, midtone: Float = 0.08
+        for x in stride(from: Float(0), through: 1, by: 0.017) {
+            let there = Baker.forwardStretch(x, shadow: shadow, midtone: midtone)
+            let back = Baker.inverseStretch(there, shadow: shadow, midtone: midtone)
+            // Below the black point the stretch clips to 0 (lossy by design); stars
+            // are bright, so only assert invertibility above the shadow.
+            if x > shadow { XCTAssertEqual(back, x, accuracy: 2e-3, "stretch not invertible at \(x)") }
+        }
+
+        // 16-bit PNG write→read preserves pixels (top-row-first, no flip).
+        let w = 5, h = 3
+        var rgb = [Float](repeating: 0, count: w*h*3)
+        for i in 0..<(w*h*3) { rgb[i] = Float((i * 37) % 100) / 99 }
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("nebula_png16_\(UUID().uuidString).png")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try Baker.writePNG16(rgb, w: w, h: h, to: url)
+        let back = try Baker.readPNG16(url, w: w, h: h)
+        XCTAssertEqual(back.count, rgb.count)
+        for i in 0..<rgb.count { XCTAssertEqual(back[i], rgb[i], accuracy: 1.0/65535 + 1e-4,
+                                                "PNG bridge changed pixel \(i)") }
+    }
+
     func testQualityStatsDetectBackgroundCast() {
         let neutral = [Float](repeating: 0.02, count: 100 * 3)
         var cast = neutral
