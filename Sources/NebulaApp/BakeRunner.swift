@@ -35,7 +35,7 @@ final class BakeRunner {
               FileManager.default.fileExists(atPath: dir.appendingPathComponent("corrected.fits").path),
               let data = try? Data(contentsOf: dir.appendingPathComponent("manifest.json")),
               let manifest = try? NebulaCore.Manifest(jsonData: data) else { return false }
-        return manifest.stageOutcomes.contains { $0.stage == "pipeline-v5" && $0.succeeded }
+        return manifest.stageOutcomes.contains { $0.stage == "pipeline-v6" && $0.succeeded }
     }
 
     /// Bake `subsDir` into a layers dir, streaming progress via `onProgress`

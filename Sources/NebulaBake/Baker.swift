@@ -185,7 +185,7 @@ public struct Baker {
         // --- 6. Manifest ---------------------------------------------------
         let manifest = Manifest(target: target, look: target.profile.initialLook,
                                 colourMethod: colourMethod, layers: layers,
-                                stageOutcomes: outcomes + [StageOutcome(stage: "pipeline-v5", succeeded: true)])
+                                stageOutcomes: outcomes + [StageOutcome(stage: "pipeline-v6", succeeded: true)])
         try manifest.jsonData().write(to: outDir.appendingPathComponent("manifest.json"))
         onProgress(Progress(fraction: 1.0, status: "Done"))
         return manifest
@@ -418,14 +418,18 @@ public struct Baker {
         for i in 0..<n {
             lum[i] = detection[i*3]*0.2126 + detection[i*3+1]*0.7152 + detection[i*3+2]*0.0722
         }
-        // Star-resistant background: blur, clip peaks down to it, blur again —
-        // bright stars can't inflate their own local background estimate.
+        // Star-resistant background: morphological opening (erode→dilate)
+        // then blur. Clip-and-blur let a bright star's own halo inflate the
+        // estimate (~3x plateau measured on M 8: starless 0.027 over a 0.008
+        // sky), which rendered as a bright ring around any star the user
+        // shrank or dimmed. An erosion element larger than the halo removes
+        // the star outright — it cannot contribute to its own background —
+        // and the dilation restores the surrounding structure's extent.
         let radius = max(6, min(w, h) / 96)
         func localBackground(_ src: [Float]) -> [Float] {
-            let first = boxBlur(src, h: h, w: w, c: 1, radius: radius)
-            var clipped = src
-            for i in 0..<n { clipped[i] = min(src[i], first[i]) }
-            return boxBlur(clipped, h: h, w: w, c: 1, radius: radius)
+            let opened = Self.dilate(Self.erode(src, h: h, w: w, radius: radius),
+                                     h: h, w: w, radius: radius)
+            return boxBlur(opened, h: h, w: w, c: 1, radius: radius)
         }
         let bg = localBackground(lum)
         // Robust residual scale via MAD on a sparse sample.
@@ -456,6 +460,35 @@ public struct Baker {
                 out[i*3+ch] = master[i*3+ch] * (1 - mask[i]) + cbg[i] * mask[i]
             }
         }
+        return out
+    }
+
+    /// Separable sliding-window minimum (greyscale erosion), single channel.
+    static func erode(_ src: [Float], h: Int, w: Int, radius: Int) -> [Float] {
+        func pass(_ s: [Float], length: Int, count: Int, stride: Int, base: (Int) -> Int) -> [Float] {
+            var out = s
+            for line in 0..<count {
+                let b = base(line)
+                for i in 0..<length {
+                    var m = s[b + i*stride]
+                    for d in max(0, i-radius)...min(length-1, i+radius) {
+                        m = min(m, s[b + d*stride])
+                    }
+                    out[b + i*stride] = m
+                }
+            }
+            return out
+        }
+        let horizontal = pass(src, length: w, count: h, stride: 1) { $0 * w }
+        return pass(horizontal, length: h, count: w, stride: w) { $0 }
+    }
+
+    /// Separable sliding-window maximum (greyscale dilation), single channel.
+    static func dilate(_ src: [Float], h: Int, w: Int, radius: Int) -> [Float] {
+        var negated = src
+        for i in negated.indices { negated[i] = -negated[i] }
+        var out = erode(negated, h: h, w: w, radius: radius)
+        for i in out.indices { out[i] = -out[i] }
         return out
     }
 

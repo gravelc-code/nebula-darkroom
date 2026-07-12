@@ -55,6 +55,32 @@ final class NebulaBakeTests: XCTestCase {
         XCTAssertEqual(starless[corner], master[corner], accuracy: 1e-4)
     }
 
+    /// Regression: a bright star's own halo must not inflate the background
+    /// estimate it is replaced with. One clip-and-blur pass left a ~3x
+    /// elevated plateau under big stars, which rendered as a bright ring
+    /// around any star the user shrank or dimmed (M 8, 2026-07-12).
+    func testClassicalStarlessLeavesNoElevatedPlateauUnderBrightStars() {
+        let w=128, h=128
+        let bg: Float = 0.01
+        var master=[Float](repeating: bg, count: w*h*3)
+        for y in 0..<h { for x in 0..<w {
+            let d=Float((x-64)*(x-64)+(y-64)*(y-64))
+            // Saturated core + halo comparable to the estimator's element
+            // (the regime where clip-and-blur used to fail).
+            let star: Float = min(0.85 * exp(-d/8), 0.8)
+            for ch in 0..<3 { master[(y*w+x)*3+ch] += star }
+        } }
+        let starless = Baker.classicalStarless(master: master, detection: master,
+                                               h: h, w: w, c: 3)
+        // Everywhere under/near the star the replacement must stay close to
+        // the true background — no bright plateau, no ring.
+        for r in [0, 4, 8, 12] {
+            let p = (64*w + 64 + r)*3
+            XCTAssertLessThan(starless[p], bg * 2.2,
+                              "elevated starless plateau at r=\(r): \(starless[p]) vs bg \(bg)")
+        }
+    }
+
     func testProtectSignalKeepsNebulaColourAndCorrectsSky() {
         let w = 64, h = 64, n = w*h
         var master = [Float](repeating: 0, count: n*3)

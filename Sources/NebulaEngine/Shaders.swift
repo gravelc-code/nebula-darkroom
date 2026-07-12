@@ -166,9 +166,19 @@ kernel void processNebula(texture2d<float, access::read>  master   [[texture(0)]
     // the linear flux before the stretch pulls the rendered diameter in
     // without touching the core or anything star-free (flux is zero there).
     float3 presenceFlux = starFlux;
+    float3 baseDelta = 0.0;
     float shrink = clamp(u.starShrink, 0.0, 1.0);
     if (shrink > 1e-3) {
+        // Separation (especially the classical mask) captures only a star's
+        // inner disc; the outer halo tail stays baked into the STARLESS layer.
+        // Eroding the flux alone would shrink the core and leave that tail as
+        // a bright ring ("donut") — most visible over nebulosity. So erode the
+        // starless base by the same element too, but only inside a mask
+        // dilated from bright flux: halo tails shrink with their star while
+        // star-free nebula stays bit-identical.
         float3 e1 = starFlux, e2 = starFlux, e3 = starFlux;
+        float3 s1 = sl, s2 = sl, s3v = sl;
+        float dil = luminance(starFlux);
         int W = int(outNeb.get_width()), H = int(outNeb.get_height());
         for (int dy = -3; dy <= 3; ++dy) {
             for (int dx = -3; dx <= 3; ++dx) {
@@ -181,9 +191,10 @@ kernel void processNebula(texture2d<float, access::read>  master   [[texture(0)]
                 float3 ncm = mix(master.read(q).rgb, ncl, cb);
                 float3 nsl = max(ncm + (starless.read(q).rgb - ncl), 0.0);
                 float3 nflux = max(ncm - nsl, 0.0);
-                if (r2 <= 2) e1 = min(e1, nflux);
-                if (r2 <= 5) e2 = min(e2, nflux);
-                e3 = min(e3, nflux);
+                if (r2 <= 2) { e1 = min(e1, nflux); s1 = min(s1, nsl); }
+                if (r2 <= 5) { e2 = min(e2, nflux); s2 = min(s2, nsl); }
+                e3 = min(e3, nflux); s3v = min(s3v, nsl);
+                dil = max(dil, luminance(nflux));
             }
         }
         // Morphological interpolation: shrink sweeps the erosion radius 0→3 px
@@ -192,8 +203,17 @@ kernel void processNebula(texture2d<float, access::read>  master   [[texture(0)]
         presenceFlux = s3 < 1.0 ? mix(starFlux, e1, s3)
                      : s3 < 2.0 ? mix(e1, e2, s3 - 1.0)
                                 : mix(e2, e3, s3 - 2.0);
+        float3 slTight = s3 < 1.0 ? mix(sl, s1, s3)
+                       : s3 < 2.0 ? mix(s1, s2, s3 - 1.0)
+                                  : mix(s2, s3v, s3 - 2.0);
+        // Only meaningful star cores get their surroundings eroded: the mask
+        // needs bright flux within the disc (halo rings hug bright stars), so
+        // faint field stars and clean nebula never pay the cost.
+        float ring = smoothstep(0.02, 0.12, dil) * shrink;
+        baseDelta = (slTight - sl) * ring;   // ≤ 0 by construction
     }
-    float3 neb = mix(sl, cleanNeb, db) + presenceFlux * clamp(u.starWeight, 0.0, 1.0);
+    float3 neb = max(mix(sl, cleanNeb, db) + baseDelta, 0.0)
+               + presenceFlux * clamp(u.starWeight, 0.0, 1.0);
 
     // Auto base stretch: per-channel black point + MTF midtone (linear->display).
     float3 shadow = float3(u.shadow0, u.shadow1, u.shadow2);
