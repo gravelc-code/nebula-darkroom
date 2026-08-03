@@ -69,6 +69,10 @@ struct Uniforms {
     float starWeight;
     float starD;
     float starShrink;
+    // The sky level the base stretch achieved for this image, measured on the
+    // CPU. The Background black point is a fraction of it and every
+    // sky-relative threshold below is derived from it.
+    float autoSky;
     // Auto base stretch (linear -> display), computed per channel from image
     // statistics on the CPU — the same idea as Siril autostretch. The sliders
     // above modulate on top of this sane baseline ("Import -> instant Auto").
@@ -81,17 +85,42 @@ struct Uniforms {
 };
 
 // asinh glow stretch: lifts faint signal, D = strength (0 => identity).
+// Used only for the Star Size bloom lift; the nebula tone curve is the GHS below.
 static inline float glowStretch(float x, float D) {
     x = clamp(x, 0.0, 1.0);
     if (D < 1e-4) return x;
     return asinh(D * x) / asinh(D);
 }
 
+// The published Generalised Hyperbolic Stretch (ghsastro.co.uk; Siril ght.c),
+// hyperbolic branch (b > 0), LP = 0, C1-continuous, f(0)=0, f(1)=1. Evaluated
+// on the above-sky signal so the sky pedestal is invariant by construction.
+// Mirrored on the CPU as `GHS.stretch` in NebulaCore — keep the maths in sync.
+static inline float ghsT(float x, float D, float B) {
+    return 1.0 - pow(1.0 + D * B * x, -1.0 / B);
+}
+static inline float ghsTd(float x, float D, float B) {
+    return D * pow(1.0 + D * B * x, -(1.0 + B) / B);
+}
+static inline float ghsStretch(float t, float D, float B, float SP, float HP) {
+    t = clamp(t, 0.0, 1.0);
+    if (D < 1e-4) return t;
+    float q0 = -ghsT(SP, D, B);
+    float q1 = ghsT(HP - SP, D, B) + ghsTd(HP - SP, D, B) * (1.0 - HP);
+    float q  = 1.0 / max(q1 - q0, 1e-6);
+    float Ti = t < SP ? -ghsT(SP - t, D, B)
+             : t < HP ? ghsT(t - SP, D, B)
+                      : ghsT(HP - SP, D, B) + ghsTd(HP - SP, D, B) * (t - HP);
+    return clamp((Ti - q0) * q, 0.0, 1.0);
+}
+
 // Midtones transfer (contrast pivot around SP). Same closed form as the bake's
 // finishing stretch, so the look family is consistent end to end.
 static inline float mtfPivot(float x, float SP) {
     x = clamp(x, 0.0, 1.0);
-    float m = clamp(SP, 0.01, 0.99);
+    // Linear deep-sky data needs midtones of ~1e-3 to reach the target
+    // background; a 0.01 floor here silently capped the whole auto stretch.
+    float m = clamp(SP, 1.0e-4, 0.9999);
     float d = (2.0 * m - 1.0) * x - m;
     if (fabs(d) < 1e-6) return x;
     return clamp(((m - 1.0) * x) / d, 0.0, 1.0);
@@ -114,21 +143,14 @@ static inline float3 withLuminance(float3 c, float oldLum, float newLum) {
     return max(c * (newLum / oldLum), 0.0);
 }
 
-static inline float contrastCurve(float x, float amount) {
-    x = clamp(x, 0.0, 1.0);
-    float a = pow(max(x, 1e-6), amount);
-    float b = pow(max(1.0 - x, 1e-6), amount);
-    return a / max(a + b, 1e-6);
-}
-
-// Compress the brightest channel as a unit rather than clipping channels one
-// by one. A gentle shoulder retains core structure and avoids false star hues.
+// Bring an out-of-range pixel back as a unit rather than clipping channels one
+// by one (independent clipping skews star hues). In range it is the identity —
+// the stretch curves own the highlight shoulder, and star cores reach white.
 static inline float3 protectHighlights(float3 c) {
     c = max(c, 0.0);
     float peak = max(c.r, max(c.g, c.b));
-    if (peak <= 0.82) return c;
-    float mapped = 0.82 + 0.18 * (1.0 - exp(-(peak - 0.82) / 0.18));
-    return c * (min(mapped, 1.0) / max(peak, 1e-6));
+    if (peak <= 1.0) return c;
+    return c / peak;
 }
 
 kernel void processNebula(texture2d<float, access::read>  master   [[texture(0)]],
@@ -141,7 +163,7 @@ kernel void processNebula(texture2d<float, access::read>  master   [[texture(0)]
     if (gid.x >= outNeb.get_width() || gid.y >= outNeb.get_height()) return;
 
     float3 rawMaster = master.read(gid).rgb;
-    float cb = clamp(u.correctionBlend / 0.8, 0.0, 1.0);
+    float cb = clamp(u.correctionBlend, 0.0, 1.0);
     float3 correctedLayer = corrected.read(gid).rgb;
     float3 correctedMaster = mix(rawMaster, correctedLayer, cb);
     // The starless/denoised layers were baked FROM the corrected master, so
@@ -219,6 +241,10 @@ kernel void processNebula(texture2d<float, access::read>  master   [[texture(0)]
     }
     float3 neb = max(mix(sl, cleanNeb, db) + baseDelta, 0.0)
                + presenceFlux * clamp(u.starWeight, 0.0, 1.0);
+    // How star-dominated this pixel is, judged in linear space before any
+    // stretch — used to whiten clipped star cores without touching nebula.
+    float starness = luminance(presenceFlux)
+                   / max(luminance(sl) + luminance(presenceFlux), 1e-6);
 
     // Auto base stretch: per-channel black point + MTF midtone (linear->display).
     float3 shadow = float3(u.shadow0, u.shadow1, u.shadow2);
@@ -226,29 +252,38 @@ kernel void processNebula(texture2d<float, access::read>  master   [[texture(0)]
     neb = max((neb - shadow) / max(1.0 - shadow, 1e-4), 0.0);
     neb = float3(mtfPivot(neb.r, midtone.r), mtfPivot(neb.g, midtone.g),
                  mtfPivot(neb.b, midtone.b));
+
+    // Background: subtract a FRACTION of this image's own sky level, so the
+    // slider means the same thing whether the base stretch left the sky at
+    // 0.12 or, on a high-dynamic-range target, far darker.
+    float sky = clamp(u.autoSky, 0.0, 0.6);
+    float bp = clamp(u.blackPoint, 0.0, 0.95) * sky;
     float lum = luminance(neb);
-
-    // Extra black point from the Background slider, on the now-display-range data.
-    float bp = clamp(u.blackPoint, -0.05, 0.08);
-    lum = luminance(neb);
-    float bgLum = bp >= 0.0 ? max(lum - bp, 0.0) / max(1.0 - bp, 1e-3)
-                            : lum + (-bp) * (1.0 - lum);
+    float bgLum = max(lum - bp, 0.0) / max(1.0 - bp, 1e-3);
     neb = withLuminance(neb, lum, bgLum);
+    // Where the sky now sits — the anchor for the tone curve and colour gates.
+    float f = clamp((sky - bp) / max(1.0 - bp, 1e-3), 0.0, 0.5);
 
-    // GHS-family slider stretch on top of the auto base (glow + contrast pivot).
+    // Published GHS on the above-sky signal, linked on luminance and applied
+    // colour-preserving. Glow = strength (D), Contrast = symmetry point (where
+    // the stretch concentrates: low = lift everything faint, high = punchy
+    // midtones over dark sky). The sky floor itself never moves.
     lum = luminance(neb);
-    float shaped = glowStretch(lum, u.glowD);
+    float shaped = lum;
+    if (lum > f) {
+        float t = (lum - f) / max(1.0 - f, 1e-4);
+        shaped = f + (1.0 - f) * ghsStretch(t, u.glowD, 2.5, u.contrastSP, 0.90);
+    }
     float preContrast = shaped;
-    shaped = contrastCurve(shaped, u.contrastSP);
     neb = withLuminance(neb, lum, shaped);
 
-    // Colour is three independent controls, all luminance-weighted so the
-    // background stays neutral (no colour lifted out of noise). The weight uses
-    // the PRE-contrast tone as well: a strong contrast curve darkens the nebula
-    // body, and weighting on the darkened value alone would drain its colour
+    // Colour is four independent controls (Saturation, Vibrance, Tint, Warmth),
+    // all weighted against the sky floor so the background stays neutral — no
+    // colour is lifted out of noise. The weight uses the PRE-stretch tone as
+    // well, so a curve that darkens the nebula body can't drain its colour
     // exactly when the user asks for punch.
     lum = luminance(neb);
-    float w = smoothstep(0.015, 0.18, max(lum, preContrast));
+    float w = smoothstep(f * 0.5, f + 0.12, max(lum, preContrast));
 
     // Saturation: a uniform chroma scale toward/away from grey.
     float satF = mix(1.0, u.saturation, w);
@@ -269,33 +304,44 @@ kernel void processNebula(texture2d<float, access::read>  master   [[texture(0)]
     lum = luminance(neb);
     neb = max(lum + (neb - lum) * vibF, 0.0);
 
-    // Tint: green↔magenta balance. Neutral (0.5) keeps a moderate SCNR-style green
-    // suppression — broadband deep sky has no lone-green emitters, so green above
-    // both red and blue is a stacking/gradient cast; cyan (OIII, green+blue)
-    // survives via the blue channel. Toward magenta (tint<0.5) suppresses green
-    // harder; toward green (tint>0.5) restores and then adds green.
+    // Saturated Bayer star cores carry unreliable hue: fade bright,
+    // star-dominated pixels toward white (the reference look — white cores,
+    // coloured halos). The starness gate keeps bright nebulosity untouched.
+    float corePeak = max(neb.r, max(neb.g, neb.b));
+    float coreW = smoothstep(0.75, 0.92, corePeak) * smoothstep(0.35, 0.75, starness);
+    neb = mix(neb, float3(corePeak), 0.85 * coreW);
+
+    // Tint: green↔magenta balance. Neutral (0.5) keeps only a light finishing
+    // SCNR (the reference-tool convention — calibrated data shouldn't need
+    // more), using Siril's average-neutral estimator with lightness preserved
+    // so real teals/OIII shift hue slightly rather than darken. Toward magenta
+    // the suppression strengthens to a full SCNR; toward green it releases and
+    // then adds green.
     float tg = (u.tint - 0.5) * 2.0;                    // -1 magenta .. +1 green
-    float scnr = clamp(0.7 - tg, 0.0, 1.0);
-    neb.g = mix(neb.g, min(neb.g, max(neb.r, neb.b)), scnr);
+    float scnr = clamp(0.25 - tg * 0.75, 0.0, 1.0);
+    if (scnr > 0.0) {
+        float preL = luminance(neb);
+        float m = 0.5 * (neb.r + neb.b);                // average neutral
+        neb.g = mix(neb.g, min(neb.g, m), scnr);
+        neb = withLuminance(neb, luminance(neb), preL); // preserve lightness
+    }
     if (tg > 0.0) neb.g = neb.g * (1.0 + tg * 0.35);
 
     // Warmth: the second white-balance axis (blue↔amber). Warm lifts red and
-    // trims blue; cool the reverse. Corrects the residual blue the calibration
-    // leaves after neutralising heavy red light-pollution.
+    // trims blue; cool the reverse. A trim, not a wash — the calibrated colour
+    // should already be close.
     float wm = (u.warmth - 0.5) * 2.0;                  // -1 cool .. +1 warm
-    neb.r = max(neb.r * (1.0 + wm * 0.28), 0.0);
-    neb.b = max(neb.b * (1.0 - wm * 0.28), 0.0);
+    neb.r = max(neb.r * (1.0 + wm * 0.15), 0.0);
+    neb.b = max(neb.b * (1.0 - wm * 0.15), 0.0);
 
-    // Shadow neutralisation: faint-signal colour is noise, so a blue-green cast
-    // pools in the deep shadows once Glow lifts them. Fade chroma toward neutral
-    // grey below ~12% luminance — real colour above the noise floor is untouched.
+    // Shadow neutralisation: colour at or below the sky floor is noise, so fade
+    // its chroma toward neutral grey. Anchored on the analytic sky floor —
+    // faint nebulosity above the sky keeps its colour.
     float nlum = luminance(neb);
-    float sw = clamp((0.12 - nlum) / 0.10, 0.0, 1.0) * clamp(u.shadowNeutralize, 0.0, 1.0);
+    float sw = clamp(((f + 0.05) - nlum) / 0.10, 0.0, 1.0) * clamp(u.shadowNeutralize, 0.0, 1.0);
     neb = mix(neb, float3(nlum), sw);
 
-    neb = protectHighlights(neb);
-
-    outNeb.write(float4(neb, 1.0), gid);
+    outNeb.write(float4(max(neb, 0.0), 1.0), gid);
 }
 
 kernel void finish(texture2d<float, access::sample> nebula [[texture(0)]],
@@ -364,7 +410,7 @@ kernel void finish(texture2d<float, access::sample> nebula [[texture(0)]],
     structure = clamp(structure, -0.22, 0.22);
     float detailedLum = max(lum + recovered * u.detailStrength
                                  + structure * u.structureStrength, 0.0);
-    neb = protectHighlights(withLuminance(neb, lum, detailedLum));
+    neb = withLuminance(neb, lum, detailedLum);
 
     // Star Size bloom ONLY: star presence is already in the image linearly.
     // The Star Size slider screens in the separately-stretched star layer
@@ -389,8 +435,8 @@ kernel void finish(texture2d<float, access::sample> nebula [[texture(0)]],
         // chroma toward white, retaining genuine colour in ordinary field stars.
         float brightStarSat = 1.0 - 0.82 * smoothstep(0.52, 0.94, liftedStarLum);
         stStr = liftedStarLum + (stStr - liftedStarLum) * brightStarSat;
-        stStr *= bloom;
-        outc = 1.0 - (1.0 - neb) * (1.0 - protectHighlights(stStr));
+        stStr = clamp(stStr * bloom, 0.0, 1.0);
+        outc = 1.0 - (1.0 - min(neb, 1.0)) * (1.0 - stStr);
     }
 
     outTex.write(float4(clamp(protectHighlights(outc), 0.0, 1.0), 1.0), gid);
@@ -410,7 +456,6 @@ kernel void stretchBefore(texture2d<float, access::read>  master [[texture(0)]],
     c = max((c - shadow) / max(1.0 - shadow, 1e-4), 0.0);
     c = float3(mtfPivot(c.r, midtone.r), mtfPivot(c.g, midtone.g),
                mtfPivot(c.b, midtone.b));
-    c = protectHighlights(c);
     outTex.write(float4(clamp(c, 0.0, 1.0), 1.0), gid);
 }
 """;

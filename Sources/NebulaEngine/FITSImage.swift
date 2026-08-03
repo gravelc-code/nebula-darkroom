@@ -192,4 +192,48 @@ public struct FITSImage: Sendable {
 
         try data.write(to: url)
     }
+
+    /// Rewrite a FITS file's pixel data while byte-preserving its ENTIRE
+    /// header — astrometry/WCS cards survive, so the result still plate-solves.
+    /// The template must already be the narrow float layout the bake consumes
+    /// (`BITPIX=-32`, plane-separated) with matching dimensions.
+    public static func writeReplacingPixels(template: URL, to url: URL, hwc: [Float],
+                                            width: Int, height: Int, channels: Int) throws {
+        let cards = try readHeaderCards(template)
+        guard Int(cards["NAXIS1"] ?? "") == width, Int(cards["NAXIS2"] ?? "") == height else {
+            throw NSError(domain: "FITSImage", code: 10, userInfo: [
+                NSLocalizedDescriptionKey: "template dimensions do not match"])
+        }
+        let raw = try Data(contentsOf: template)
+        var headerEnd: Int?
+        var block = 0
+        scan: while (block + 1) * 2880 <= raw.count {
+            for card in 0..<36 {
+                let o = block * 2880 + card * 80
+                if raw[o] == UInt8(ascii: "E"), raw[o+1] == UInt8(ascii: "N"),
+                   raw[o+2] == UInt8(ascii: "D"), raw[o+3] == UInt8(ascii: " ") {
+                    headerEnd = (block + 1) * 2880
+                    break scan
+                }
+            }
+            block += 1
+        }
+        guard let headerEnd else {
+            throw NSError(domain: "FITSImage", code: 11, userInfo: [
+                NSLocalizedDescriptionKey: "no END card in template header"])
+        }
+        var out = Data(raw.prefix(headerEnd))
+        let plane = width * height
+        let planes = channels == 3 ? 3 : 1
+        var floats = [UInt32](repeating: 0, count: plane * planes)
+        for p in 0..<plane {
+            for ch in 0..<planes {
+                floats[ch * plane + p] = hwc[p * channels + ch].bitPattern.bigEndian
+            }
+        }
+        floats.withUnsafeBytes { out.append(contentsOf: $0) }
+        let rem = out.count % 2880
+        if rem != 0 { out.append(Data(count: 2880 - rem)) }
+        try out.write(to: url)
+    }
 }

@@ -113,6 +113,18 @@ public struct Manifest: Codable, Equatable, Sendable {
         return nil
     }
 
+    /// The look to open this bake with.
+    ///
+    /// A look saved by an older pipeline is **not portable**: the sliders were
+    /// re-based on the published GHS in v8 (Glow became a log-domain D, Contrast
+    /// the symmetry point, Background a fraction of the measured sky), so
+    /// replaying those numbers through the current engine renders something the
+    /// user never chose. When the bake predates the current pipeline, open on
+    /// today's default instead — the target is flagged for re-develop anyway.
+    public func look(forPipelineVersion current: Int) -> LookState {
+        pipelineVersion == current ? look : .default
+    }
+
     /// True when all four layers are present — the precondition for Stage B.
     public var hasAllLayers: Bool {
         let present = Set(layers.map(\.layer))

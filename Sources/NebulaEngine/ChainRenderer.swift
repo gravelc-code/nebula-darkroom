@@ -27,6 +27,10 @@ public struct EngineParamsGPU {
     var starWeight: Float
     var starD: Float
     var starShrink: Float
+    /// The sky level the base stretch achieved for THIS image (measured, not
+    /// assumed) — the shader derives the black point and every sky-relative
+    /// threshold from it.
+    var autoSky: Float
     var shadow0: Float; var shadow1: Float; var shadow2: Float
     var midtone0: Float; var midtone1: Float; var midtone2: Float
     var starShadow0: Float; var starShadow1: Float; var starShadow2: Float
@@ -41,6 +45,7 @@ public struct EngineParamsGPU {
         saturation = p.saturation; vibrance = p.vibrance; tint = p.tint
         warmth = p.warmth; shadowNeutralize = p.shadowNeutralize
         starWeight = p.starWeight; starD = p.starD; starShrink = p.starShrink
+        autoSky = a.displaySky
         shadow0 = a.shadow.0; shadow1 = a.shadow.1; shadow2 = a.shadow.2
         midtone0 = a.midtone.0; midtone1 = a.midtone.1; midtone2 = a.midtone.2
         starShadow0 = s.shadow.0; starShadow1 = s.shadow.1; starShadow2 = s.shadow.2
@@ -86,30 +91,89 @@ struct BlitUniforms { var divider: Float; var compare: Float; var clipping: Floa
 public struct AutoStretch {
     public var shadow: (Float, Float, Float)
     public var midtone: (Float, Float, Float)
+    /// Where the sky actually lands in display space after this stretch. It is
+    /// *measured*, not assumed: the midtone is adaptive (see below), so on a
+    /// high-dynamic-range target the sky deliberately lands darker than
+    /// `targetBG`. Everything downstream anchors on this value.
+    public var displaySky: Float = 0.12
 
-    public init(base: FITSImage, targetBG: Float = 0.15) {
-        func parameters(channel: Int) -> (Float, Float) {
+    /// `targetBG` is where the sky lands after this base stretch. Siril's and
+    /// PixInsight's 0.25 is a *screen* convention for inspecting linear data;
+    /// on a finished image it is far too bright — pulling the sky that high
+    /// compresses everything above it (a galaxy core at 29× sky arrives at
+    /// 0.91 before a single slider moves, so it can only ever render white).
+    /// Nebula lands the base stretch near a finished background and lets the
+    /// GHS above shape the tones, which is what the published workflows do.
+    /// The midtone that maps `x` to `y` under the MTF — the standard identity
+    /// `m = MTF(y, x)` PixInsight's STFAutoStretch uses to hit a target level.
+    static func midtoneMapping(_ x: Float, to y: Float) -> Float {
+        x * (1 - y) / max(x * (1 - 2 * y) + y, 1e-9)
+    }
+
+    static func mtf(_ x: Float, _ m: Float) -> Float {
+        let d = (2 * m - 1) * x - m
+        return abs(d) < 1e-9 ? x : min(max(((m - 1) * x) / d, 0), 1)
+    }
+
+    /// - Parameter extended: the starless layer when available. The highlight
+    ///   guard below must respond to the **subject's** brightness, not to a few
+    ///   saturated field stars — on a galaxy field the stars sit far above the
+    ///   galaxy, and measuring them would throttle the stretch of an image that
+    ///   needs all of it. Star-free pixels answer the right question.
+    public init(base: FITSImage, extended: FITSImage? = nil, targetBG: Float = 0.12,
+                highlightCap: Float = 0.88, minSky: Float = 0.03) {
+        func samples(_ image: FITSImage, channel: Int) -> [Float] {
             var vals: [Float] = []
-            vals.reserveCapacity(base.width * base.height / 16)
+            vals.reserveCapacity(image.width * image.height / 16)
             var i = channel
-            while i < base.rgba.count {
-                let v = base.rgba[i]
+            while i < image.rgba.count {
+                let v = image.rgba[i]
                 if v > 1e-7 && v.isFinite { vals.append(v) }
                 i += 16
             }
             if vals.isEmpty { vals = [0, 1e-4] }
             vals.sort()
+            return vals
+        }
+        func parameters(channel: Int) -> (Float, Float, Float) {
+            let vals = samples(base, channel: channel)
             let median = vals[vals.count / 2]
             var dev = vals.map { abs($0 - median) }; dev.sort()
-            let sigma = 1.4826 * dev[dev.count / 2]
-            let s = max(0, median - 2.8 * sigma)
-            let x0 = (median - s) / max(1 - s, 1e-4)
-            let m = x0 * (1 - targetBG) / max(x0 * (1 - 2 * targetBG) + targetBG, 1e-6)
-            return (s, min(max(m, 1e-4), 0.5))
+            var mad = dev[dev.count / 2]
+            if mad == 0 { mad = 0.001 }   // Siril's guard for flat frames
+            let sigma = 1.4826 * mad
+            // Clip guard: MAD saturates on gradient-dominated frames, and a
+            // black point above the displayed layer's pedestal crushes the
+            // whole channel (the "94% of red at zero" failure). Never clip
+            // more than the darkest 0.5% of this channel's finite pixels.
+            let p05 = vals[max(0, Int(Float(vals.count) * 0.005) - 1)]
+            let s = min(max(0, median - 2.8 * sigma), p05)
+            let norm = { (v: Float) in max(v - s, 0) / max(1 - s, 1e-4) }
+            let x0 = norm(median)
+            let highSource = extended.map { samples($0, channel: channel) } ?? vals
+            let hi = norm(highSource[min(highSource.count - 1, Int(Float(highSource.count) * 0.999))])
+
+            // Placing the sky at `targetBG` is the right call for an ordinary
+            // frame, but it says nothing about the top end — and deep-sky
+            // targets differ there by orders of magnitude (M 42's sky sits at
+            // 574× below its bright nebula; M 8's at 12×). Applied blindly, the
+            // same rule drives M 42's whole nebula body past white.
+            //
+            // So take the *gentlest* midtone that still satisfies both ends:
+            // keep the bright end under `highlightCap`, but never darken the
+            // sky below `minSky` chasing it. On an ordinary frame the highlight
+            // constraint is slack and this reduces to the classic autostretch.
+            let mBG = Self.midtoneMapping(x0, to: targetBG)
+            let mHi = Self.midtoneMapping(hi, to: highlightCap)
+            let mFloor = Self.midtoneMapping(x0, to: minSky)
+            let m = min(max(mBG, mHi), max(mFloor, mBG))
+            let clamped = min(max(m, 1e-4), 0.5)
+            return (s, clamped, Self.mtf(x0, clamped))
         }
         let r = parameters(channel: 0), g = parameters(channel: 1), b = parameters(channel: 2)
         shadow = (r.0, g.0, b.0)
         midtone = (r.1, g.1, b.1)
+        displaySky = (r.2 + g.2 + b.2) / 3
     }
 }
 
@@ -243,15 +307,18 @@ public final class ChainRenderer: @unchecked Sendable {
         let nebTex, outTex, beforeTex: MTLTexture
         public let width: Int, height: Int
         let auto: AutoStretch
+        /// Master-derived stretch for the truthful "before" view only.
+        let autoBefore: AutoStretch
         let star: StarStretch
         init(master: MTLTexture, corrected: MTLTexture, denoised: MTLTexture, starless: MTLTexture,
              stars: MTLTexture, nebTex: MTLTexture, outTex: MTLTexture,
              beforeTex: MTLTexture, width: Int, height: Int,
-             auto: AutoStretch, star: StarStretch) {
+             auto: AutoStretch, autoBefore: AutoStretch, star: StarStretch) {
             self.master = master; self.corrected = corrected; self.denoised = denoised
             self.starless = starless; self.stars = stars
             self.nebTex = nebTex; self.outTex = outTex; self.beforeTex = beforeTex
-            self.width = width; self.height = height; self.auto = auto; self.star = star
+            self.width = width; self.height = height; self.auto = auto
+            self.autoBefore = autoBefore; self.star = star
         }
     }
 
@@ -290,7 +357,14 @@ public final class ChainRenderer: @unchecked Sendable {
         let starless = originalStarless.cropped(x: region.x, y: region.y, width: region.width, height: region.height)
         let stars = originalStars.cropped(x: region.x, y: region.y, width: region.width, height: region.height)
         let (w, h) = (master.width, master.height)
-        let auto = AutoStretch(base: master), star = StarStretch(base: stars)
+        // The chain renders ~90% the corrected layer at the default look, so the
+        // auto stretch must come from the SAME layer — master-derived statistics
+        // put the black point above the corrected pedestal (PCC rescales
+        // channels, BGE re-pedestals them) and crushed whole channels to zero.
+        // The raw master keeps its own stretch for the truthful "before" view.
+        let auto = AutoStretch(base: corrected, extended: starless)
+        let autoBefore = AutoStretch(base: master)
+        let star = StarStretch(base: stars)
         let masterTex = upload(master)
         // outTex/beforeTex are mipmapped so the fit-to-window preview downsamples
         // faithfully (faint stars survive); the compute writes mip 0.
@@ -300,14 +374,14 @@ public final class ChainRenderer: @unchecked Sendable {
             starless: upload(starless), stars: upload(stars),
             nebTex: scratch(w, h, mipmapped: true), outTex: scratch(w, h, mipmapped: true),
             beforeTex: scratch(w, h, mipmapped: true),
-            width: w, height: h, auto: auto, star: star)
+            width: w, height: h, auto: auto, autoBefore: autoBefore, star: star)
         renderBefore(bundle)
         return bundle
     }
 
     /// Render the static "before" (raw stack, auto-stretched) once.
     private func renderBefore(_ b: LayerBundle) {
-        var u = EngineParamsGPU(LookState.neutral.engineParams, auto: b.auto, star: b.star)
+        var u = EngineParamsGPU(LookState.neutral.engineParams, auto: b.autoBefore, star: b.star)
         let tpg = MTLSize(width: 16, height: 16, depth: 1)
         let grid = MTLSize(width: (b.width + 15) / 16, height: (b.height + 15) / 16, depth: 1)
         let cmd = queue.makeCommandBuffer()!

@@ -142,16 +142,31 @@ This is why "all-Metal" is the right call *here specifically*: the interactive l
 
 | User label | Internal | Acts on |
 |------------|----------|---------|
-| Glow | GHS D | starless |
-| Contrast | GHS SP | starless |
-| Background | black point | starless |
-| Colour | midtone saturation | starless |
-| Detail | local contrast | starless |
+| Glow | GHS D (log-domain, `expm1`) | starless |
+| Contrast | GHS SP (symmetry point) | starless |
+| Background | correction blend + black point (sets `skyFloor`) | starless |
+| Saturation | uniform chroma scale | starless |
+| Vibrance | chroma-protected boost | starless |
+| Tint | SCNR green balance | starless |
+| Warmth | red↔blue white-balance trim | starless |
+| Detail | multi-scale local contrast | starless |
 | Stars | star weight | recombine |
-| Star Size | GHS D on stars | stars |
-| Denoise | master↔denoised blend | master |
+| Star Size | flux erosion below 50 · GHS D on stars above | stars |
+| Denoise | master↔denoised blend + bilateral | master |
 
-The whole look is ~8 floats → saved in the manifest, shareable as a preset, reproducible.
+The whole look is 11 floats → saved in the manifest, shareable, reproducible.
+
+**The GHS is the published closed form** (ghsastro.co.uk; Siril `ght.c`),
+hyperbolic branch with LP = 0, mirrored on the CPU as `NebulaCore/GHS.swift` so
+the shader's curve is unit-testable. It is applied to the *above-sky* signal, so
+the sky floor is invariant under Glow and Contrast by construction.
+
+**Base stretch:** a per-channel MTF autostretch (shadow = median − 2.8·MADN,
+Siril's constant) measured on the **corrected** layer — the one actually
+rendered — landing the sky at 0.12. That is deliberately below Siril's 0.25,
+which is a *screen* convention: pulling the sky that high compresses everything
+above it, so a bright core can only ever render white. The GHS above does the
+tone shaping.
 
 ---
 

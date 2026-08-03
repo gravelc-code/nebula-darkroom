@@ -162,3 +162,78 @@ so re-opening a target is instant. The bake driver lives in
   (accurate architecture; models downloaded-not-shipped), CONTRIBUTING.md,
   GitHub Actions CI (`.github/workflows/ci.yml`), `docs/RELEASING.md`,
   `scripts/gen-notices.sh` (bundled-dylib licence inventory at DMG build).
+
+## 2026-08-03 · Output quality overhaul (pipeline v8)
+
+The one-tap result was losing to the Seestar phone app: dim, muddy, desaturated.
+Root-caused to compounding defects rather than one bug; every fix below was
+verified on the real cached bakes (`~/Library/Caches/Nebula/`).
+
+**Render (the big ones)**
+- **The auto stretch never reached its target.** `mtfPivot`/`Baker.mtf` clamped
+  the MTF midtone to ≥0.01, but linear deep-sky data needs ~1e-3 — so the base
+  stretch silently under-delivered on every image. Floor is now 1e-4.
+- **The stretch was derived from the wrong layer.** `AutoStretch` measured the
+  raw master while the chain renders the *corrected* layer (PCC rescales
+  channels, BGE re-pedestals them). On M 83 that put the black point above the
+  corrected red pedestal and crushed **94 % of the red channel to zero** — the
+  cyan sky the Warmth/shadow-neutralise sliders were invented to hide. Now
+  measured on `corrected`, with a P0.5 clip guard; the raw master keeps its own
+  stretch for the truthful "before".
+- **`targetBG` 0.25 → 0.12.** 0.25 is Siril/PixInsight's *screen* convention for
+  inspecting linear data; it compresses everything above it (M 83's nucleus
+  arrived at 0.91 before a slider moved, so it could only render white).
+  Finished images sit darker and the GHS above does the shaping. StarNet still
+  gets 0.25 — it is trained on screen-stretched data.
+- **`protectHighlights` ran three times** (0.82 shoulder, composed) so nothing
+  could exceed **0.887** — no white star cores, no sparkle. Now applied once, as
+  a hue-preserving overflow guard only.
+- **Published GHS replaces the ad-hoc curve.** `asinh` + a 0.5-pivot logistic
+  (which *darkened* essentially the whole astro image) are gone. `GHS.swift` is
+  the closed form from ghsastro.co.uk / Siril `ght.c`, mirrored bit-for-bit in
+  the shader and unit-tested for monotonicity, C1 continuity and endpoints
+  across the whole slider range. Glow = D (log-domain, `expm1`), Contrast = the
+  symmetry point, applied to the *above-sky* signal so the sky floor is
+  invariant. Background is now an analytic black point with a `skyFloor` uniform
+  the tone and colour stages anchor on.
+- **Colour**: SCNR was a permanent 0.7 green kill; now a 0.25 average-neutral
+  trim with lightness preserved (Siril's `rmgreen` convention), full strength
+  only as Tint moves toward magenta. Shadow-neutralise and the chroma gate are
+  anchored to the sky floor instead of fixed constants, Warmth's slope halved.
+  Saturated star cores whiten (gated on linear "starness"), so cores go white
+  while halos keep colour.
+
+**Bake**
+- **Star separation was eating the subject.** StarNet takes a galaxy nucleus for
+  one big star (M 83 kept 22 % of its extended flux); the classical mask used a
+  23 px opening that read nebular filaments as stars. Now: the star layer is
+  unconditionally constrained to **compact** flux (morphological top-hat), then
+  gated by an **extended-flux retention validator** (≥0.70) with a fallback
+  ladder. M 83 now accepts StarNet at 0.94. Note the validator measures an
+  *opening*, not a blur — a blur conserves a star's flux and so reads legitimate
+  star removal in a rich field as subject loss (there is a regression test).
+- **Colour order fixed**: background extraction now runs **before** PCC (Siril
+  was warning "correct the image gradient first" on every single bake), on a
+  header-preserving FITS copy so the plate solve keeps its seed. PCC normalises
+  its largest gain to 1, so calibration is always a *net dimming* (M 42 lost
+  58 % of its red flux); a scalar luminance renormalisation restores the scale
+  and leaves the calibrated ratios alone. `protectSignal` — which left the
+  subject 85 % uncalibrated on a neutralised sky, the textbook "muddy" signature
+  — is gone. BGE now uses GraXpert's own 0.5 smoothing instead of 0.
+- **Stacking**: `-filter-wfwhm=90%` was a *percentile* — it always binned the
+  worst 10 % even on a clean night. Now `=3k` (sigma). `-weight=noise` replaces
+  `-weight=wfwhm` (SNR-correct for mixed 10 s/30 s Seestar sessions), and
+  `force_16bit=0` is set explicitly rather than inherited from the user's config.
+- **Honest integration**: `STACKCNT`/`LIVETIME` are read from the master, so the
+  UI reports what was *stacked* (M 83: 112 frames / 2380 s) rather than what was
+  imported (126 / 2600) — the old figure over-claimed by 10–37 %.
+- **`BakeRunner` never reused a cache** (it tested for the literal
+  `"pipeline-v6"` while `pipelineVersion` was 7), so every open silently re-ran
+  the entire bake. It now compares `Baker.pipelineVersion`, and refuses to delete
+  layers it cannot rebuild when the source subs are offline.
+- **StarNet had never actually run** on a real target: the discovered command
+  left `{input}`/`{output}` unquoted through `bash -c`, and every cache dir has a
+  space in it ("M 42"). It now runs in a space-free scratch dir from the binary's
+  own directory (weights load relative to CWD).
+- `erode`/`dilate` were O(pixels × radius) and dominated bake time; now O(pixels)
+  via a monotonic deque (bit-exact against the naive form, tested).
