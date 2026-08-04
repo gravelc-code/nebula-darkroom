@@ -69,8 +69,8 @@ extension LookState {
         // below neutral tightens the display-ballooned halo without touching
         // the core. Warmth is neutral: it existed to hide a red-crushing
         // stretch bug that no longer exists.
-        LookState(percent: [.glow: 62, .saturation: 66, .vibrance: 64, .tint: 50,
-                            .warmth: 50, .stars: 100, .contrast: 58, .background: 72,
+        LookState(percent: [.glow: 47, .saturation: 55, .vibrance: 53, .tint: 50,
+                            .warmth: 50, .stars: 100, .contrast: 58, .background: 60,
                             .detail: 55, .starSize: 42, .denoise: 55])
     }
 }

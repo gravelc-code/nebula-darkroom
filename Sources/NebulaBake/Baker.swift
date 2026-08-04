@@ -67,7 +67,7 @@ public struct Baker {
         let masterStack: URL
         if reuseStack {
             onProgress(Progress(fraction: 0.10, status: "Reusing cached stack…"))
-            target = reusableTarget(outDir: outDir, subsDir: subsDir)
+            target = reusableTarget(outDir: outDir, subsDir: subsDir, master: cachedStack)
             masterStack = cachedStack
             outcomes.append(StageOutcome(stage: "register+stack", succeeded: true,
                                          fallback: "reused-cached-stack"))
@@ -288,6 +288,27 @@ public struct Baker {
 
     // MARK: - Target metadata from the first sub's header
 
+    /// Whether a `FILTER` header names an emission-line filter, whose data must
+    /// NOT go through photometric colour calibration.
+    ///
+    /// The Seestar's **"LP" filter is dual-narrowband** (Ha ~20 nm + OIII
+    /// ~30 nm) — it is named for what it rejects, not for a broad passband.
+    /// PCC derives a white balance from star photometry assuming a broadband
+    /// response; applied to emission-line data it scaled M 8's red by 0.55 and
+    /// took the nebula from R/G 1.82 to 1.11 — Ha rendered as grey. Narrowband
+    /// data gets background neutralisation only, so its line ratios survive.
+    static func isNarrowband(filter: String?) -> Bool {
+        let f = (filter ?? "").lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        if f.isEmpty { return false }
+        return f == "lp" || f.contains("duo") || f.contains("narrow")
+            || f.contains("ha") || f.contains("oiii")
+    }
+
+    /// Test seam for the header→`Target` classification (filter, band, profile).
+    func makeTargetForTesting(subsDir: URL, selection: SirilStage.LightSelection) -> Target {
+        makeTarget(subsDir: subsDir, selection: selection)
+    }
+
     private func makeTarget(subsDir: URL, selection: SirilStage.LightSelection) -> Target {
         let cards = selection.lights.first?.header ?? [:]
         let exposures = selection.lights.map(\.exposure).sorted()
@@ -296,9 +317,7 @@ public struct Baker {
         let object = cards["OBJECT"]
         let name = object ?? cleanName(subsDir)
         let profile = Profile.guess(filter: filter, objectType: object)
-        let lowerFilter = filter?.lowercased() ?? ""
-        let narrow = lowerFilter.contains("duo") || lowerFilter.contains("narrow")
-            || lowerFilter.contains("ha") || lowerFilter.contains("oiii")
+        let narrow = Self.isNarrowband(filter: filter)
         let capture = CaptureStats(
             frameCount: selection.lights.count, subExposureSeconds: exposure,
             totalIntegrationSeconds: selection.integrationSeconds,
@@ -312,17 +331,36 @@ public struct Baker {
     /// Target metadata for a `NEBULA_REUSE_STACK` re-bake, where the source
     /// subs may be offline: the previous manifest when present, else a minimal
     /// stand-in derived from the folder name.
-    private func reusableTarget(outDir: URL, subsDir: URL) -> Target {
+    private func reusableTarget(outDir: URL, subsDir: URL, master: URL? = nil) -> Target {
         if let data = try? Data(contentsOf: outDir.appendingPathComponent("manifest.json")),
            let manifest = try? Manifest(jsonData: data) {
-            return manifest.target
+            // Re-derive the band from the stored filter rather than trusting the
+            // old manifest's verdict: classification rules change (the Seestar's
+            // "LP" is dual-narrowband, not broadband), and a reused bake must
+            // pick that up or it silently repeats the previous mistake.
+            var target = manifest.target
+            target.capture.isBroadband = !Self.isNarrowband(filter: target.capture.filter)
+            return target
         }
-        let capture = CaptureStats(frameCount: 1, subExposureSeconds: 10,
-                                   totalIntegrationSeconds: nil, hasMixedExposures: false,
-                                   filter: nil, isBroadband: true,
-                                   raDegrees: nil, decDegrees: nil, sensorTemperatureC: nil)
-        return Target(name: cleanName(subsDir), subsPath: subsDir.path, capture: capture,
-                      profile: Profile.guess(filter: nil, objectType: nil))
+        // No manifest: take what the stacked master's own header knows. The
+        // filter in particular decides whether photometric calibration may run
+        // at all, so guessing "broadband" would silently mis-calibrate any
+        // duo-band stack handed to us directly.
+        let cards = master.flatMap { try? FITSImage.readHeaderCards($0) } ?? [:]
+        let filter = cards["FILTER"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let object = cards["OBJECT"]
+        let frames = Int(cards["STACKCNT"] ?? "") ?? 1
+        let exposure = Double(cards["EXPTIME"] ?? "") ?? 10
+        let capture = CaptureStats(frameCount: frames, subExposureSeconds: exposure,
+                                   totalIntegrationSeconds: Double(cards["LIVETIME"] ?? ""),
+                                   hasMixedExposures: false,
+                                   filter: filter?.isEmpty == false ? filter : nil,
+                                   isBroadband: !Self.isNarrowband(filter: filter),
+                                   raDegrees: nil, decDegrees: nil,
+                                   sensorTemperatureC: Double(cards["CCD-TEMP"] ?? ""))
+        return Target(name: object ?? cleanName(subsDir), subsPath: subsDir.path,
+                      capture: capture,
+                      profile: Profile.guess(filter: filter, objectType: object))
     }
 
     private func cleanName(_ dir: URL) -> String {
@@ -666,6 +704,85 @@ public struct Baker {
         for i in 0..<(h*w) { for ch in 0..<3 {
             out[i*3+ch] = min(max(commonBG + (hwc[i*3+ch] - bg[ch]) * gains[ch], 0), 1)
         } }
+        return broadband ? out : duoBandRecombine(out, h: h, w: w, c: c)
+    }
+
+    /// Recombine duo-band (Ha + OIII) data so both emission lines are legible.
+    ///
+    /// The Seestar's "LP" filter is dual-narrowband, and the sensor's response
+    /// to the two lines is wildly asymmetric. Computed from Siril's own SPCC
+    /// profiles for this exact sensor and filter (`ZWO_Seestar_S50` x
+    /// `ZWO_Seestar_LP`), a unit photon flux in each line arrives as:
+    ///
+    ///          Ha      OIII
+    ///     R [ 0.795   0.042 ]
+    ///     G [ 0.245   0.739 ]
+    ///     B [ 0.122   0.391 ]
+    ///
+    /// So pure Ha lands as RGB (1.00, 0.31, 0.15) — red collects 4.3x what the
+    /// other two do together. An untreated stack therefore renders as one flat
+    /// red *however good the data is*; the OIII structure is present but buried.
+    ///
+    /// Simply boosting green and blue — the obvious fix, and the one tried
+    /// here first — lifts Ha's **leakage** into them along with the OIII, which
+    /// washes the frame pink instead of revealing anything. So: unmix (recover
+    /// the two lines by inverting the matrix above), align their sky pedestals,
+    /// and recompose with the standard HOO weights. The measured line ratio is
+    /// rendered as-is — see the pedestal-alignment comment in the body for why
+    /// the reference tools' amplitude equalisation is deliberately NOT applied.
+    ///
+    /// A flat continuum source unmixes to Ha ≈ OIII and therefore renders
+    /// neutral — which is physically right (M 1's synchrotron interior).
+    static func duoBandRecombine(_ hwc: [Float], h: Int, w: Int, c: Int) -> [Float] {
+        guard c == 3 else { return hwc }
+        let n = h * w
+        // Least-squares inverse of the response matrix above. Verified: a pure
+        // Ha input yields (Ha 1, OIII 0), and pure OIII yields (0, 1).
+        var ha = [Float](repeating: 0, count: n)
+        var o3 = [Float](repeating: 0, count: n)
+        for p in 0..<n {
+            let r = hwc[p*3], g = hwc[p*3+1], b = hwc[p*3+2]
+            ha[p] = max(1.280 * r - 0.051 * g - 0.039 * b, 0)
+            o3[p] = max(-0.420 * r + 1.074 * g + 0.573 * b, 0)
+        }
+        func levels(_ a: [Float]) -> (median: Float, peak: Float) {
+            var s: [Float] = []
+            s.reserveCapacity(n / 8 + 1)
+            var i = 0
+            while i < n { s.append(a[i]); i += 8 }
+            s.sort()
+            return (s[s.count / 2], s[min(s.count - 1, Int(Float(s.count) * 0.995))])
+        }
+        // Align the PEDESTALS only — no amplitude boost.
+        //
+        // The reference tools (Siril's shipped script, Blanshan's
+        // NarrowbandNormalization, VeraLux) equalise OIII's amplitude to Ha's,
+        // but that is a convention for imagers who chose to shoot OIII and
+        // want to see what they captured. Applied automatically it is wrong
+        // twice over: it amplifies OIII *noise* into a teal wash on targets
+        // with little real OIII (IC 2944 went teal), and it forces every
+        // object to the same line ratio, erasing the real differences the
+        // published spectra predict (M 27 at OIII/Ha 2.45 vs M 8 at 0.20).
+        //
+        // Rendering the MEASURED ratio through the standard composition below
+        // reproduces the professional palette on its own: M 42's core
+        // (ratio ~0.97) comes out neutral-white — matching ESO's reference,
+        // which measures R/G = 1.03 there — M 27's body reads teal, and M 8 /
+        // IC 2944 stay correctly red. Pedestal alignment is kept because the
+        // two bands collect different amounts of sky (30 nm vs 20 nm), and
+        // matching medians is exactly background neutralisation.
+        let lh = levels(ha), lo = levels(o3)
+        for p in 0..<n { o3[p] = max(o3[p] - lo.median + lh.median, 0) }
+
+        // Recompose. Green carries mostly OIII with a little Ha so red regions
+        // stay warm rather than going magenta; blue is nearly pure OIII.
+        var out = [Float](repeating: 0, count: hwc.count)
+        for p in 0..<n {
+            let a = ha[p], o = o3[p]
+            out[p*3]     = min(a, 1)
+            out[p*3 + 1] = min(0.20 * a + 0.80 * o, 1)
+            out[p*3 + 2] = min(0.15 * a + 0.85 * o, 1)
+        }
         return out
     }
 

@@ -116,7 +116,7 @@ final class EngineParamsTests: XCTestCase {
         XCTAssertEqual(p.tint, 0.5, accuracy: 1e-6)         // green↔magenta neutral
         XCTAssertEqual(p.warmth, 0.5, accuracy: 1e-6)       // blue↔amber neutral
         XCTAssertEqual(p.glowD, expm1(1.5), accuracy: 1e-5)   // log-domain D → effective
-        XCTAssertEqual(p.contrastSP, 0.015 + 0.25 * 0.35, accuracy: 1e-6)
+        XCTAssertEqual(p.contrastSP, 0.01 + 0.25 * 0.12, accuracy: 1e-6)
         // Background 0.5 is still inside the correction-blend phase: no sky
         // is removed yet, and the corrected layer is not yet fully faded in.
         XCTAssertEqual(p.blackPoint, 0, accuracy: 1e-6)
@@ -185,7 +185,7 @@ final class EngineParamsTests: XCTestCase {
         XCTAssertEqual(p.detailStrength, 0.7, accuracy: 1e-6)
         XCTAssertEqual(p.structureStrength, 1.6, accuracy: 1e-6)
         XCTAssertEqual(p.glowD, expm1(3.0), accuracy: 1e-4)
-        XCTAssertEqual(p.contrastSP, 0.365, accuracy: 1e-6)
+        XCTAssertEqual(p.contrastSP, 0.13, accuracy: 1e-6)
         // Background at full removes 70% of the sky — never all of it.
         XCTAssertEqual(p.blackPoint, 0.70, accuracy: 1e-6)
         XCTAssertEqual(p.correctionBlend, 1, accuracy: 1e-6)
@@ -249,11 +249,11 @@ final class GHSTests: XCTestCase {
     /// The published-GHS invariants the shader relies on. The Metal ghsStretch
     /// mirrors `GHS.stretch` exactly — these tests guard the shared maths.
     func testEndpointsAndIdentity() {
-        XCTAssertEqual(GHS.stretch(0, D: 5, b: 2.5, SP: 0.13, HP: 0.9), 0, accuracy: 1e-6)
-        XCTAssertEqual(GHS.stretch(1, D: 5, b: 2.5, SP: 0.13, HP: 0.9), 1, accuracy: 1e-5)
+        XCTAssertEqual(GHS.stretch(0, D: 5, b: GHS.b, SP: 0.13, HP: GHS.highlightProtect), 0, accuracy: 1e-6)
+        XCTAssertEqual(GHS.stretch(1, D: 5, b: GHS.b, SP: 0.13, HP: GHS.highlightProtect), 1, accuracy: 1e-5)
         // D ≈ 0 is the identity (Glow slider at zero changes nothing).
         for x: Float in [0, 0.1, 0.4, 0.9] {
-            XCTAssertEqual(GHS.stretch(x, D: 0, b: 2.5, SP: 0.13, HP: 0.9), x, accuracy: 1e-6)
+            XCTAssertEqual(GHS.stretch(x, D: 0, b: GHS.b, SP: 0.13, HP: GHS.highlightProtect), x, accuracy: 1e-6)
         }
     }
 
@@ -267,7 +267,7 @@ final class GHSTests: XCTestCase {
                 var prev: Float = -1
                 for i in 0...100 {
                     let x = Float(i) / 100
-                    let y = GHS.stretch(x, D: p.glowD, b: 2.5, SP: p.contrastSP, HP: 0.90)
+                    let y = GHS.stretch(x, D: p.glowD, b: GHS.b, SP: p.contrastSP, HP: GHS.highlightProtect)
                     XCTAssertGreaterThanOrEqual(y, prev - 1e-5,
                         "not monotonic at x=\(x), glow=\(gi), contrast=\(ci)")
                     XCTAssert(y >= 0 && y <= 1, "out of range: \(y)")
@@ -282,16 +282,16 @@ final class GHSTests: XCTestCase {
         var prev: Float = -1
         for i in 0...200 {
             let x = Float(i) / 200
-            let y = GHS.stretch(x, D: 8, b: 2.5, SP: 0.2, HP: 0.85)
+            let y = GHS.stretch(x, D: 8, b: GHS.b, SP: 0.05, HP: GHS.highlightProtect)
             XCTAssertGreaterThanOrEqual(y, prev - 1e-6, "not monotonic at \(x)")
             prev = y
         }
         // C1 across the symmetry point: one-sided slopes agree.
         let e: Float = 1e-4
-        let sL = (GHS.stretch(0.2, D: 8, b: 2.5, SP: 0.2, HP: 0.85)
-                - GHS.stretch(0.2 - e, D: 8, b: 2.5, SP: 0.2, HP: 0.85)) / e
-        let sR = (GHS.stretch(0.2 + e, D: 8, b: 2.5, SP: 0.2, HP: 0.85)
-                - GHS.stretch(0.2, D: 8, b: 2.5, SP: 0.2, HP: 0.85)) / e
+        let sL = (GHS.stretch(0.05, D: 8, b: GHS.b, SP: 0.05, HP: GHS.highlightProtect)
+                - GHS.stretch(0.05 - e, D: 8, b: GHS.b, SP: 0.05, HP: GHS.highlightProtect)) / e
+        let sR = (GHS.stretch(0.05 + e, D: 8, b: GHS.b, SP: 0.05, HP: GHS.highlightProtect)
+                - GHS.stretch(0.05, D: 8, b: GHS.b, SP: 0.05, HP: GHS.highlightProtect)) / e
         XCTAssertEqual(sL, sR, accuracy: max(sL, sR) * 0.02)
     }
 
@@ -299,8 +299,8 @@ final class GHSTests: XCTestCase {
     /// itself is invariant under any Glow/Contrast setting.
     func testSkyAnchoredApplicationLeavesTheFloorAlone() {
         let f: Float = 0.124
-        for (d, sp): (Float, Float) in [(1, 0.05), (5, 0.13), (19, 0.36)] {
-            let y = f + (1 - f) * GHS.stretch(0, D: d, b: 2.5, SP: sp, HP: 0.9)
+        for (d, sp): (Float, Float) in [(1, 0.02), (5, 0.05), (19, 0.12)] {
+            let y = f + (1 - f) * GHS.stretch(0, D: d, b: GHS.b, SP: sp, HP: GHS.highlightProtect)
             XCTAssertEqual(y, f, accuracy: 1e-6)
         }
     }

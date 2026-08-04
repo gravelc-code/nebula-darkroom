@@ -32,6 +32,93 @@ final class NebulaBakeTests: XCTestCase {
                                                 "PNG bridge changed pixel \(i)") }
     }
 
+    /// The Seestar's "LP" filter is dual-narrowband (Ha + OIII) despite its
+    /// name. Classifying it as broadband sends emission-line data through
+    /// photometric calibration, which flattens Ha to grey.
+    func testSeestarLPFilterIsTreatedAsNarrowband() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        func light(_ name: String, filter: String) throws {
+            let url = dir.appendingPathComponent("\(name).fits")
+            try FITSImage.fromHWC([Float](repeating: 0.1, count: 4*4*3),
+                                  width: 4, height: 4, channels: 3).write(url)
+            var data = try Data(contentsOf: url)
+            func card(_ k: String, _ v: String) -> Data {
+                Data((k.padding(toLength: 8, withPad: " ", startingAt: 0) + "= " + v)
+                    .padding(toLength: 80, withPad: " ", startingAt: 0).utf8)
+            }
+            let end = 6 * 80
+            data.replaceSubrange(end..<(end+80), with: card("FILTER", "'\(filter)'"))
+            data.replaceSubrange((end+80)..<(end+160),
+                with: Data("END".padding(toLength: 80, withPad: " ", startingAt: 0).utf8))
+            try data.write(to: url)
+        }
+        try light("a", filter: "LP")
+        let lp = try SirilStage.selectLights(in: dir)
+        XCTAssertEqual(lp.filter, "LP")
+        XCTAssertFalse(Baker().makeTargetForTesting(subsDir: dir, selection: lp).capture.isBroadband,
+                       "Seestar LP is dual-narrowband — must not go through photometric calibration")
+
+        try FileManager.default.removeItem(at: dir.appendingPathComponent("a.fits"))
+        try light("b", filter: "IRCUT")
+        let ircut = try SirilStage.selectLights(in: dir)
+        XCTAssertTrue(Baker().makeTargetForTesting(subsDir: dir, selection: ircut).capture.isBroadband,
+                      "IRCUT is genuinely broadband — calibration applies")
+    }
+
+    /// Physical contract of the duo-band recombination. Every expectation here
+    /// derives from the measured instrument response (Siril's SPCC profiles
+    /// for the Seestar sensor × LP filter) or a published line ratio — none of
+    /// it is aesthetic tuning.
+    func testDuoBandRecombineRendersLinePhysicsFaithfully() {
+        let w = 64, h = 64, n = w * h
+        // The response matrix columns: what a unit flux in each line puts on RGB.
+        let haRGB: [Float] = [0.795, 0.245, 0.122]
+        let o3RGB: [Float] = [0.042, 0.739, 0.391]
+        let skyLevel: Float = 0.002
+        var img = [Float](repeating: 0, count: n * 3)
+        func paint(_ range: Range<Int>, ha: Float, o3: Float) {
+            for p in range { for ch in 0..<3 {
+                img[p*3+ch] = skyLevel + ha * haRGB[ch] + o3 * o3RGB[ch]
+            } }
+        }
+        for p in 0..<n { for ch in 0..<3 { img[p*3+ch] = skyLevel } }
+        paint(0..<200,    ha: 0.05, o3: 0.0)     // pure Ha region
+        paint(200..<400,  ha: 0.0,  o3: 0.05)    // pure OIII region
+        paint(400..<600,  ha: 0.03, o3: 0.03)    // flat continuum (synchrotron)
+        paint(600..<800,  ha: 0.05, o3: 0.05 * 0.20)   // M 8-like ratio (0.20)
+        paint(800..<1000, ha: 0.02, o3: 0.02 * 2.45)   // M 27-like ratio (2.45)
+
+        let out = Baker.duoBandRecombine(img, h: h, w: w, c: 3)
+        func rgb(_ p: Int) -> (Float, Float, Float) { (out[p*3], out[p*3+1], out[p*3+2]) }
+
+        // Pure Ha renders red; pure OIII renders teal (G and B above R).
+        let ha0 = rgb(50)
+        XCTAssertGreaterThan(ha0.0, (ha0.1 + ha0.2) / 2 * 1.5, "pure Ha must read clearly red")
+        let o30 = rgb(250)
+        XCTAssertGreaterThan((o30.1 + o30.2) / 2, o30.0 * 1.5, "pure OIII must read clearly teal")
+
+        // A flat continuum (equal flux in both bands) renders near-neutral —
+        // the physically correct look for M 1's synchrotron interior.
+        let ct = rgb(450)
+        let peak = max(ct.0, ct.1, ct.2), low = min(ct.0, ct.1, ct.2)
+        XCTAssertLessThan((peak - low) / max(peak, 1e-6), 0.25, "continuum must stay near-neutral")
+
+        // Published ratios keep their ordering: an M 27-like pixel is teal, an
+        // M 8-like pixel is red — the recombination must not flatten objects
+        // into one palette (which full amplitude equalisation did).
+        let m8 = rgb(650), m27 = rgb(850)
+        XCTAssertGreaterThan(m8.0, (m8.1 + m8.2) / 2, "OIII/Ha=0.20 must stay red")
+        XCTAssertGreaterThan((m27.1 + m27.2) / 2, m27.0, "OIII/Ha=2.45 must read teal")
+
+        // Sky stays neutral: the two bands collect different sky pedestals and
+        // the recombination must align them, never tint the background.
+        let sky = rgb(n - 100)
+        let smax = max(sky.0, sky.1, sky.2), smin = min(sky.0, sky.1, sky.2)
+        XCTAssertLessThan(smax - smin, 0.002, "sky must stay neutral after recombine")
+    }
+
     func testQualityStatsDetectBackgroundCast() {
         let neutral = [Float](repeating: 0.02, count: 100 * 3)
         var cast = neutral

@@ -95,15 +95,17 @@ public struct AutoStretch {
     /// *measured*, not assumed: the midtone is adaptive (see below), so on a
     /// high-dynamic-range target the sky deliberately lands darker than
     /// `targetBG`. Everything downstream anchors on this value.
-    public var displaySky: Float = 0.12
+    public var displaySky: Float = 0.15
 
-    /// `targetBG` is where the sky lands after this base stretch. Siril's and
-    /// PixInsight's 0.25 is a *screen* convention for inspecting linear data;
-    /// on a finished image it is far too bright — pulling the sky that high
-    /// compresses everything above it (a galaxy core at 29× sky arrives at
-    /// 0.91 before a single slider moves, so it can only ever render white).
-    /// Nebula lands the base stretch near a finished background and lets the
-    /// GHS above shape the tones, which is what the published workflows do.
+    /// `targetBG` is where the sky lands after this base stretch, chosen so the
+    /// FINISHED sky obeys the published conventions. Two sources agree on the
+    /// finished level: Lodriguss's RGB 35-35-35 guideline (≈ 0.08–0.14) and the
+    /// duo-band survey's "neutral near-black grey, ~5–12% luminance". The
+    /// default look's Background trim removes ~21% of the sky, so a base of
+    /// 0.15 lands the finished sky at ≈ 0.12 — inside both ranges. (Siril's
+    /// and PixInsight's 0.25 is a *screen* convention for inspecting linear
+    /// data, far too bright for a finished image: a core at 29× sky would
+    /// arrive at 0.91 before a single slider moved.)
     /// The midtone that maps `x` to `y` under the MTF — the standard identity
     /// `m = MTF(y, x)` PixInsight's STFAutoStretch uses to hit a target level.
     static func midtoneMapping(_ x: Float, to y: Float) -> Float {
@@ -120,8 +122,15 @@ public struct AutoStretch {
     ///   saturated field stars — on a galaxy field the stars sit far above the
     ///   galaxy, and measuring them would throttle the stretch of an image that
     ///   needs all of it. Star-free pixels answer the right question.
-    public init(base: FITSImage, extended: FITSImage? = nil, targetBG: Float = 0.12,
-                highlightCap: Float = 0.88, minSky: Float = 0.03) {
+    /// - Parameter highlightCap: where the subject's bright end lands. This is
+    ///   also the **colour headroom** control: a colour-preserving stretch
+    ///   scales RGB by one luminance factor, so a saturated pixel hits the
+    ///   gamut boundary well below white. Park the bright end too high and
+    ///   every strong colour ends up pinned there — the image flattens into a
+    ///   slab and the Saturation slider stops doing anything, because chroma is
+    ///   dictated by the boundary rather than by the setting.
+    public init(base: FITSImage, extended: FITSImage? = nil, targetBG: Float = 0.15,
+                highlightCap: Float = 0.72, minSky: Float = 0.065) {
         func samples(_ image: FITSImage, channel: Int) -> [Float] {
             var vals: [Float] = []
             vals.reserveCapacity(image.width * image.height / 16)
@@ -135,45 +144,93 @@ public struct AutoStretch {
             vals.sort()
             return vals
         }
-        func parameters(channel: Int) -> (Float, Float, Float) {
+        // --- 1. Per-channel black point: this is what neutralises the sky. ---
+        //
+        // Each channel is clipped the SAME distance below its own median, not
+        // 2.8x its own sigma. The midtone above is linked, so sky neutrality
+        // now rests entirely here: a per-channel depth leaves the noisier
+        // channel with more residual above its black point and the background
+        // renders with that channel's cast (M 8's sky came out distinctly red).
+        // A common depth makes every channel's normalised median equal, which
+        // is the definition of a neutral sky.
+        func statsFor(channel: Int) -> (median: Float, sigma: Float, p05: Float) {
             let vals = samples(base, channel: channel)
             let median = vals[vals.count / 2]
             var dev = vals.map { abs($0 - median) }; dev.sort()
             var mad = dev[dev.count / 2]
             if mad == 0 { mad = 0.001 }   // Siril's guard for flat frames
-            let sigma = 1.4826 * mad
-            // Clip guard: MAD saturates on gradient-dominated frames, and a
-            // black point above the displayed layer's pedestal crushes the
-            // whole channel (the "94% of red at zero" failure). Never clip
-            // more than the darkest 0.5% of this channel's finite pixels.
-            let p05 = vals[max(0, Int(Float(vals.count) * 0.005) - 1)]
-            let s = min(max(0, median - 2.8 * sigma), p05)
-            let norm = { (v: Float) in max(v - s, 0) / max(1 - s, 1e-4) }
-            let x0 = norm(median)
-            let highSource = extended.map { samples($0, channel: channel) } ?? vals
-            let hi = norm(highSource[min(highSource.count - 1, Int(Float(highSource.count) * 0.999))])
-
-            // Placing the sky at `targetBG` is the right call for an ordinary
-            // frame, but it says nothing about the top end — and deep-sky
-            // targets differ there by orders of magnitude (M 42's sky sits at
-            // 574× below its bright nebula; M 8's at 12×). Applied blindly, the
-            // same rule drives M 42's whole nebula body past white.
-            //
-            // So take the *gentlest* midtone that still satisfies both ends:
-            // keep the bright end under `highlightCap`, but never darken the
-            // sky below `minSky` chasing it. On an ordinary frame the highlight
-            // constraint is slack and this reduces to the classic autostretch.
-            let mBG = Self.midtoneMapping(x0, to: targetBG)
-            let mHi = Self.midtoneMapping(hi, to: highlightCap)
-            let mFloor = Self.midtoneMapping(x0, to: minSky)
-            let m = min(max(mBG, mHi), max(mFloor, mBG))
-            let clamped = min(max(m, 1e-4), 0.5)
-            return (s, clamped, Self.mtf(x0, clamped))
+            return (median, 1.4826 * mad,
+                    vals[max(0, Int(Float(vals.count) * 0.005) - 1)])
         }
-        let r = parameters(channel: 0), g = parameters(channel: 1), b = parameters(channel: 2)
-        shadow = (r.0, g.0, b.0)
-        midtone = (r.1, g.1, b.1)
-        displaySky = (r.2 + g.2 + b.2) / 3
+        let st = (statsFor(channel: 0), statsFor(channel: 1), statsFor(channel: 2))
+        let depth = 2.8 * (st.0.sigma + st.1.sigma + st.2.sigma) / 3
+        // Clip guard: MAD saturates on gradient-dominated frames, and a black
+        // point above the displayed layer's pedestal crushes the whole channel
+        // (the "94% of red at zero" failure). Never clip more than the darkest
+        // 0.5% of a channel's finite pixels.
+        func shadowFrom(_ s: (median: Float, sigma: Float, p05: Float)) -> Float {
+            min(max(0, s.median - depth), s.p05)
+        }
+        let sh = (shadowFrom(st.0), shadowFrom(st.1), shadowFrom(st.2))
+        shadow = sh
+
+        // --- 2. ONE midtone, measured on luminance and applied colour-
+        // preserving (the shader scales RGB by the same scalar).
+        //
+        // Stretching each channel to its own target is what an unlinked
+        // autostretch does, and on emission data it does not merely shift the
+        // balance — it destroys the colour. The MTF saturates, so the channel
+        // carrying the most signal is compressed hardest: an M 8 pixel at
+        // R/G 1.83 came out at 0.91, i.e. a red nebula rendered faintly blue.
+        // Every reference tool stretches a luminance and scales RGB by the
+        // same factor (PixInsight ArcsinhStretch, GHS "human/even" colour
+        // models) for exactly this reason.
+        func normalised(_ v: Float, _ s: Float) -> Float { max(v - s, 0) / max(1 - s, 1e-4) }
+        func luminanceSamples(_ image: FITSImage) -> [Float] {
+            var vals: [Float] = []
+            vals.reserveCapacity(image.width * image.height / 16)
+            var i = 0
+            while i + 2 < image.rgba.count {
+                let l = normalised(image.rgba[i], sh.0) * 0.2126
+                      + normalised(image.rgba[i + 1], sh.1) * 0.7152
+                      + normalised(image.rgba[i + 2], sh.2) * 0.0722
+                if l.isFinite { vals.append(l) }
+                i += 16
+            }
+            if vals.isEmpty { vals = [0, 1e-4] }
+            vals.sort()
+            return vals
+        }
+        let lum = luminanceSamples(base)
+        let x0 = lum[lum.count / 2]
+        let highSource = extended.map { luminanceSamples($0) } ?? lum
+        let hi = highSource[min(highSource.count - 1, Int(Float(highSource.count) * 0.999))]
+
+        // Placing the sky at `targetBG` is the right call for an ordinary
+        // frame, but it says nothing about the top end — and deep-sky targets
+        // differ there by orders of magnitude (M 42's sky sits 574× below its
+        // bright nebula; M 8's only 12×). Applied blindly, the same rule drives
+        // M 42's whole nebula body past white.
+        //
+        // So take the *gentlest* midtone that still satisfies both ends: keep
+        // the bright end under `highlightCap`, but never darken the sky below
+        // `minSky` chasing it. On an ordinary frame the highlight constraint is
+        // slack and this reduces to the classic autostretch.
+        //
+        // `minSky` is 0.065 so that after the Background slider's maximum
+        // black-point trim (which removes up to ~21% of the sky at the default
+        // look) the finished sky still lands inside the documented 0.05-0.09
+        // convention. It was 0.03 — which contradicted that convention and
+        // held whole high-dynamic-range frames dark (the independent 244-sub
+        // M 42 landed its sky at 0.028). Squeezing the sky is not this stage's
+        // job: highlight protection belongs to the GHS highlight-protect
+        // point (0.20), whose entire purpose is compressing the bright end.
+        let mBG = Self.midtoneMapping(x0, to: targetBG)
+        let mHi = Self.midtoneMapping(hi, to: highlightCap)
+        let mFloor = Self.midtoneMapping(x0, to: minSky)
+        let m = min(max(min(max(mBG, mHi), max(mFloor, mBG)), 1e-4), 0.5)
+        midtone = (m, m, m)
+        displaySky = Self.mtf(x0, m)
     }
 }
 

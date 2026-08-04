@@ -115,7 +115,10 @@ public struct EngineParams: Equatable, Sendable {
         // full slider ≈ Siril `autoghs` territory. Contrast is the GHS symmetry
         // point on the above-sky signal, quadratic so the low half stays gentle.
         glowD = expm1(glow * 3.0)
-        contrastSP = 0.015 + contrast * contrast * 0.35
+        // The symmetry point sits just above the sky, where the faint signal
+        // is. Pushing it high concentrates the stretch on the *bright* body,
+        // which is exactly how an image ends up blown.
+        contrastSP = 0.01 + contrast * contrast * 0.12
 
         // Detail now drives a *multi-scale* local contrast. The small-radius band
         // (bite) stays conservative so it can't crunch into noise, while the

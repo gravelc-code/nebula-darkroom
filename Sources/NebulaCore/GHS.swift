@@ -15,6 +15,19 @@ import Foundation
 ///   t ≥ HP         T4(t) = T3(HP) + T3′(HP)·(t − HP)   (linear, protects cores)
 ///   f(t) = (Ti(t) − T2(0)) / (T4(1) − T2(0))           (f(0)=0, f(1)=1, C1)
 public enum GHS {
+    /// Local stretch intensity. High values concentrate the curve just above
+    /// the sky and flatten it further up, which is what separates faint
+    /// nebulosity without driving the bright body toward white. Siril's
+    /// `autoghs` uses 13 in the same spirit.
+    public static let b: Float = 8
+
+    /// Highlight-protect point, on the above-sky signal. Above it the transfer
+    /// is linear at the (by then shallow) curve slope, so the bright end is
+    /// compressed into a small part of the output range instead of crowding
+    /// against white. This is the single control that decides whether a bright
+    /// core reads as structure or as a blown patch — it must stay low.
+    public static let highlightProtect: Float = 0.20
+
     /// The effective strength for a log-domain slider value, per the published
     /// convention (PixInsight labels the slider "ln(D+1)"; Siril applies expm1).
     public static func effectiveD(_ logD: Float) -> Float { expm1(logD) }

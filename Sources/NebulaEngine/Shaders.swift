@@ -143,14 +143,31 @@ static inline float3 withLuminance(float3 c, float oldLum, float newLum) {
     return max(c * (newLum / oldLum), 0.0);
 }
 
-// Bring an out-of-range pixel back as a unit rather than clipping channels one
-// by one (independent clipping skews star hues). In range it is the identity —
-// the stretch curves own the highlight shoulder, and star cores reach white.
+// Bring an out-of-range pixel back into gamut WITHOUT darkening it: hold the
+// luminance and pull chroma toward the achromatic axis only as far as needed.
+//
+// A colour-preserving stretch scales RGB by a single luminance factor, so on a
+// strongly coloured pixel the dominant channel reaches 1 first. Clipping that
+// channel alone shifts the hue; scaling all three down dims the subject just
+// where it should be brightest. Desaturating to the gamut boundary is what
+// keeps a bright Ha core reading as a bright core rather than a flat red slab.
+// In range this is the identity — the stretch owns the highlight shoulder.
 static inline float3 protectHighlights(float3 c) {
     c = max(c, 0.0);
     float peak = max(c.r, max(c.g, c.b));
-    if (peak <= 1.0) return c;
-    return c / peak;
+    const float knee = 0.85;
+    if (peak <= knee) return c;
+    // Roll the peak channel off smoothly toward 1 instead of stopping dead at
+    // it. A hard boundary pins every over-range pixel to exactly the same
+    // value, so a bright nebula body flattens into one slab and the Saturation
+    // slider stops mattering — chroma is then set by the boundary, not by the
+    // setting. The exponential shoulder is asymptotic, so star cores still
+    // reach white while the body keeps its tonal separation.
+    float mapped = knee + (1.0 - knee) * (1.0 - exp(-(peak - knee) / (1.0 - knee)));
+    float L = luminance(c);
+    if (L >= mapped) return float3(clamp(mapped, 0.0, 1.0));
+    float t = (mapped - L) / max(peak - L, 1e-6);
+    return clamp(L + (c - L) * t, 0.0, 1.0);
 }
 
 kernel void processNebula(texture2d<float, access::read>  master   [[texture(0)]],
@@ -246,12 +263,15 @@ kernel void processNebula(texture2d<float, access::read>  master   [[texture(0)]
     float starness = luminance(presenceFlux)
                    / max(luminance(sl) + luminance(presenceFlux), 1e-6);
 
-    // Auto base stretch: per-channel black point + MTF midtone (linear->display).
+    // Auto base stretch: a per-channel black point (this is what neutralises
+    // the sky), then ONE midtone applied to luminance and carried back
+    // colour-preserving. Stretching the channels independently compresses the
+    // strongest one hardest and flattens — even inverts — real colour; every
+    // reference tool scales RGB by a single luminance-derived factor instead.
     float3 shadow = float3(u.shadow0, u.shadow1, u.shadow2);
-    float3 midtone = float3(u.midtone0, u.midtone1, u.midtone2);
     neb = max((neb - shadow) / max(1.0 - shadow, 1e-4), 0.0);
-    neb = float3(mtfPivot(neb.r, midtone.r), mtfPivot(neb.g, midtone.g),
-                 mtfPivot(neb.b, midtone.b));
+    float baseLum = luminance(neb);
+    neb = withLuminance(neb, baseLum, mtfPivot(baseLum, u.midtone0));
 
     // Background: subtract a FRACTION of this image's own sky level, so the
     // slider means the same thing whether the base stretch left the sky at
@@ -272,7 +292,8 @@ kernel void processNebula(texture2d<float, access::read>  master   [[texture(0)]
     float shaped = lum;
     if (lum > f) {
         float t = (lum - f) / max(1.0 - f, 1e-4);
-        shaped = f + (1.0 - f) * ghsStretch(t, u.glowD, 2.5, u.contrastSP, 0.90);
+        // b and HP mirror `GHS.b` / `GHS.highlightProtect` — keep in lockstep.
+        shaped = f + (1.0 - f) * ghsStretch(t, u.glowD, 8.0, u.contrastSP, 0.20);
     }
     float preContrast = shaped;
     neb = withLuminance(neb, lum, shaped);
@@ -282,8 +303,12 @@ kernel void processNebula(texture2d<float, access::read>  master   [[texture(0)]
     // colour is lifted out of noise. The weight uses the PRE-stretch tone as
     // well, so a curve that darkens the nebula body can't drain its colour
     // exactly when the user asks for punch.
+    // Colour only above the noise floor. The base stretch is colour-preserving
+    // now, which also preserves the *chroma noise* the old per-channel stretch
+    // used to flatten, so the gate has to start at the sky rather than below it
+    // or the background fills with colour speckle.
     lum = luminance(neb);
-    float w = smoothstep(f * 0.5, f + 0.12, max(lum, preContrast));
+    float w = smoothstep(f, f + 0.18, max(lum, preContrast));
 
     // Saturation: a uniform chroma scale toward/away from grey.
     float satF = mix(1.0, u.saturation, w);
@@ -452,10 +477,9 @@ kernel void stretchBefore(texture2d<float, access::read>  master [[texture(0)]],
     if (gid.x >= outTex.get_width() || gid.y >= outTex.get_height()) return;
     float3 c = master.read(gid).rgb;
     float3 shadow = float3(u.shadow0, u.shadow1, u.shadow2);
-    float3 midtone = float3(u.midtone0, u.midtone1, u.midtone2);
     c = max((c - shadow) / max(1.0 - shadow, 1e-4), 0.0);
-    c = float3(mtfPivot(c.r, midtone.r), mtfPivot(c.g, midtone.g),
-               mtfPivot(c.b, midtone.b));
+    float bl = luminance(c);
+    c = withLuminance(c, bl, mtfPivot(bl, u.midtone0));
     outTex.write(float4(clamp(c, 0.0, 1.0), 1.0), gid);
 }
 """;
