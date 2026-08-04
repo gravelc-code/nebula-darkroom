@@ -58,13 +58,20 @@ extension LookState {
     /// faint signal (Glow), cleans the background, enriches colour, and brings in
     /// the multi-scale structure boost (Detail) so nebulosity has depth on open.
     public static var `default`: LookState {
-        // Star Size sits well below neutral: with a clean StarNet separation the
-        // real star flux tightens to points without artefacts, which is what
-        // makes a Seestar-style result — fat display-ballooned stars were the
-        // biggest gap. Glow/Background/Detail lift and clean the faint target.
-        LookState(percent: [.glow: 60, .saturation: 60, .vibrance: 62, .tint: 50,
-                            .warmth: 54, .stars: 60, .contrast: 58, .background: 72,
-                            .detail: 55, .starSize: 30, .denoise: 60])
+        // Tuned on the full cached target set (galaxies, emission nebulae, a
+        // planetary, a supernova remnant) against the published conventions:
+        // background 0.05–0.14 display, neutral to within ~2/255, no channel
+        // clipped at either end, white star cores with colour kept in the halo.
+        //
+        // Stars sit at 100 — the star layer is now validated to hold only
+        // compact flux, so dimming it by default was throwing away real signal
+        // (and, before the validator, part of the subject). Star Size just
+        // below neutral tightens the display-ballooned halo without touching
+        // the core. Warmth is neutral: it existed to hide a red-crushing
+        // stretch bug that no longer exists.
+        LookState(percent: [.glow: 47, .saturation: 55, .vibrance: 53, .tint: 50,
+                            .warmth: 50, .stars: 100, .contrast: 58, .background: 60,
+                            .detail: 55, .starSize: 42, .denoise: 55])
     }
 }
 

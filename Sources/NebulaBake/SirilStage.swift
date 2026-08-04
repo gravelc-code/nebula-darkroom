@@ -129,17 +129,28 @@ public struct SirilStage {
         // (space-free scratch guarantees that). `-debayer` is mandatory for the
         // Seestar OSC CFA. Colour calibration runs as its own fallback-aware step
         // after the stack; gradient removal runs in-process in Baker.
+        //
+        // Stacking choices:
+        // · `force_16bit=0` — the layers are float32 and `FITSImage` requires
+        //   BITPIX=-32; without this the bake depends on the user's Siril config.
+        // · `-filter-wfwhm=3k` (sigma) not `90%` (percentile): a percentile
+        //   ALWAYS discards the worst tenth even when every frame is good —
+        //   ~10% of hard-won integration thrown away on a clean night.
+        // · `-weight=noise` not `wfwhm`: Seestar sessions mix 10 s and 30 s
+        //   subs, and a 30 s sub carries 3× the signal regardless of its star
+        //   shape. Noise weighting is the SNR-correct choice.
         let ssf = """
         requires 1.2.0
         set core.mem_mode=1
         set core.mem_amount=\(memGB)
+        set core.force_16bit=0
         setext fits
         cd "\(lightsDir.path)"
         convert light -debayer -out=\(processDir.path)
         cd "\(processDir.path)"
         register light -2pass
         seqapplyreg light -framing=cog -interp=lanczos4
-        stack r_light rej w 3 3 -filter-round=2.5k -filter-wfwhm=90% -weight=wfwhm -norm=addscale -output_norm -out=\(masterOut.path)
+        stack r_light rej w 3 3 -filter-round=2.5k -filter-wfwhm=3k -weight=noise -norm=addscale -output_norm -out=\(masterOut.path)
 
         """
         let ssfURL = workDir.appendingPathComponent("bake_native.ssf")

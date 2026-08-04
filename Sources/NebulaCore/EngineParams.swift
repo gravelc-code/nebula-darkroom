@@ -29,12 +29,18 @@ public struct EngineParams: Equatable, Sendable {
     public var smoothStrength: Float
     /// Preserved master ↔ calibrated/background-corrected alternative.
     public var correctionBlend: Float
-    /// Small background trim around a neutral midpoint. Positive values darken;
-    /// negative values lift. This is deliberately not a large black-point clip.
+    /// How much of the sky level to subtract, as a **fraction of the measured
+    /// sky** rather than an absolute display value. The base stretch is
+    /// adaptive — a high-dynamic-range target lands its sky far darker than an
+    /// ordinary one — so an absolute black point would crush one image and
+    /// barely touch another. The shader scales this by the sky level the
+    /// stretch actually achieved.
     public var blackPoint: Float
-    /// Generalised hyperbolic stretch strength (D) on the starless layer.
+    /// Published-GHS stretch strength — the *effective* D (`expm1` of the
+    /// log-domain slider value, per the ghsastro/Siril convention). `0` = identity.
     public var glowD: Float
-    /// GHS symmetry point (SP) — the pivot around which contrast pivots.
+    /// Published-GHS symmetry point on the above-sky signal: where the stretch
+    /// concentrates. Low = lift everything faint; high = punchy midtones.
     public var contrastSP: Float
     /// Small-radius local contrast (unsharp on starless) — micro-detail "bite".
     public var detailStrength: Float
@@ -89,19 +95,30 @@ public struct EngineParams: Equatable, Sendable {
         // the top half has clearly visible authority.
         denoiseBlend = denoise
         smoothStrength = denoise * denoise
-        correctionBlend = background
+        // The gradient-corrected layer fades in over the first 60% of the
+        // slider and is then held at full: past that point Background only
+        // sets the black point. (The shader used to do this division itself,
+        // which left the default look rendering 10% of the raw gradient back in.)
+        correctionBlend = min(background / 0.6, 1)
 
-        // The middle of the slider is neutral. The first 60% is a reversible
-        // correction blend; the top 40% additionally trims the display black
-        // point (up to 6%) for genuinely deep blacks on demand.
-        blackPoint = max(background - 0.6, 0) * 0.15
+        // Background is two-phase, and the phases must not overlap: the first
+        // 60% fades in the gradient-corrected layer (above), and only the top
+        // 40% starts removing sky. Letting the black point act over the whole
+        // range means asking for a brighter sky also asks for *less gradient
+        // correction*, which brings the cast back — worse on both counts.
+        // Even at the top, 70% of the sky is the most that can be removed, so
+        // the background is never clipped to pure black on any target.
+        blackPoint = max(background - 0.6, 0) / 0.4 * 0.70
 
-        // Glow drives GHS stretch strength; SP (contrast) pivots the curve.
-        glowD = glow * 3.5
-        // `contrastSP` is retained in the GPU ABI, but now carries a conventional
-        // contrast amount centred on 1 rather than a second midtone stretch.
-        // Wide range so the top end crushes shadows into properly deep blacks.
-        contrastSP = 0.4 + contrast * 1.2
+        // Glow is the published-GHS strength: the slider is log-domain D
+        // (PixInsight's "ln(D+1)"), made effective with expm1 — 0 = identity,
+        // full slider ≈ Siril `autoghs` territory. Contrast is the GHS symmetry
+        // point on the above-sky signal, quadratic so the low half stays gentle.
+        glowD = expm1(glow * 3.0)
+        // The symmetry point sits just above the sky, where the faint signal
+        // is. Pushing it high concentrates the stretch on the *bright* body,
+        // which is exactly how an image ends up blown.
+        contrastSP = 0.01 + contrast * contrast * 0.12
 
         // Detail now drives a *multi-scale* local contrast. The small-radius band
         // (bite) stays conservative so it can't crunch into noise, while the
@@ -121,10 +138,10 @@ public struct EngineParams: Equatable, Sendable {
         vibrance = 1.0 + (vib - 0.5) * 1.6
         tint = Float(look[.tint])
         warmth = Float(look[.warmth])
-        // Always-on gentle shadow neutralisation, lifted a little more as the user
-        // cleans the Background — deep-shadow colour is noise, and neutralising it
-        // removes the residual blue-green cast without draining real signal colour.
-        shadowNeutralize = 0.55 + background * 0.35
+        // Gentle shadow neutralisation around the sky floor, a little stronger as
+        // the user cleans the Background. Kept mild — the colour calibration owns
+        // the overall balance; this only stops noise chroma pooling in the sky.
+        shadowNeutralize = 0.25 + background * 0.25
 
         // Stars recombine weight; Star Size is bidirectional around a neutral
         // midpoint: below 50 tightens the real star flux (shrink), above 50

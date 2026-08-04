@@ -53,6 +53,10 @@ final class EngineModel: ObservableObject {
     @Published var bundle: ChainRenderer.LayerBundle?
     @Published var progress = BakeRunner.Progress(fraction: 0, status: "")
     @Published var targetName = ""
+    /// What this image is actually made of (integration, frames, band) plus a
+    /// note when frames were dropped — shown in the editor so the user always
+    /// sees the honest figure, never the pre-cull import count.
+    @Published var captureSummary = ""
 
     @Published var look: LookState = .default
     @Published var compare = false
@@ -213,7 +217,11 @@ final class EngineModel: ObservableObject {
             invalidateAIPreview()
             bundle = b
             currentBakeDir = dir
-            look = manifest?.look ?? .default
+            captureSummary = manifest.map { m in
+                [m.target.capture.placardMeta, m.target.capture.stackedFramesNote]
+                    .compactMap { $0 }.joined(separator: " · ")
+            } ?? ""
+            look = manifest?.look(forPipelineVersion: Baker.pipelineVersion) ?? .default
             phase = .editing
             // Pre-warm the Library thumbnail from the freshly-loaded bundle so a
             // just-baked target shows a card instantly next time (no reload).
@@ -324,7 +332,10 @@ final class EngineModel: ObservableObject {
         let b = renderer.makeBundle(master: m, corrected: corrected, denoised: d, starless: s, stars: st,
                                     profile: manifest?.target.profile)
         guard let cg = try? renderer.renderThumbnail(
-            bundle: b, params: (manifest?.look ?? .default).engineParams, maxDimension: 480)
+            bundle: b,
+            params: (manifest?.look(forPipelineVersion: Baker.pipelineVersion) ?? .default)
+                .engineParams,
+            maxDimension: 480)
         else { return nil }
         writeCGImagePNG(cg, to: t.thumbURL)
         let img = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
@@ -884,9 +895,12 @@ struct EditorView: View {
                 Spacer()
                 VStack(spacing: 1) {
                     Text(model.targetName).font(.headline).foregroundStyle(.white)
-                    Text("\(bundle.width) × \(bundle.height)")
+                    Text(model.captureSummary.isEmpty
+                         ? "\(bundle.width) × \(bundle.height)"
+                         : model.captureSummary)
                         .font(.caption2.monospacedDigit()).foregroundStyle(.tertiary)
                 }
+                .help(model.captureSummary)
                 Spacer()
                 Button {
                     model.toggleAIPreview()

@@ -19,7 +19,7 @@ public struct Baker {
     /// The current bake pipeline version. Bumped whenever the bake changes in a
     /// way that improves cached layers (e.g. the star-separation halo fix, the
     /// StarNet PNG bridge) so the Library can flag older targets for re-develop.
-    public static let pipelineVersion = 7
+    public static let pipelineVersion = 8
 
     let denoiseModel: String?
     let bgeModel: String?
@@ -29,9 +29,10 @@ public struct Baker {
     /// stays pluggable rather than bundled; nil / env-unset falls back to the
     /// classical star mask so star controls keep working.
     let starnetCmd: String?
-    /// Corrections that alter the linear master are explicit opt-ins. The
-    /// untouched registered stack is the safe baseline and can always be
-    /// re-rendered; model-derived layers remain separately adjustable.
+    /// Background removal is ON by default (the reference pipelines run it
+    /// unconditionally); `NEBULA_BACKGROUND_CORRECTION=0` disables it for
+    /// debugging. The untouched registered stack is always kept as `master`,
+    /// so the correction remains a separately-blendable layer, never a bake-in.
     let applyBackgroundCorrection: Bool
     let applyNativeWhiteBalance: Bool
 
@@ -52,78 +53,124 @@ public struct Baker {
         let fm = FileManager.default
         try fm.createDirectory(at: outDir, withIntermediateDirectories: true)
         var outcomes: [StageOutcome] = []
-        let selection = try SirilStage.selectLights(in: subsDir)
-        let target = makeTarget(subsDir: subsDir, selection: selection)
-
-        // --- 1. Siril: compatible-filter selection, register + stack --------
-        onProgress(Progress(fraction: 0.10, status: "Registering & stacking…"))
         let workDir = outDir.appendingPathComponent("_work", isDirectory: true)
-        let siril = try SirilStage(sirilBin: sirilBin)
-        let masterStack = try siril.stack(subsDir: subsDir, workDir: workDir, selection: selection)
-        outcomes.append(StageOutcome(stage: "register+stack", succeeded: true))
-        outcomes.append(StageOutcome(stage: "resolution", succeeded: true,
-                                     fallback: "native-sampling-osc-safe"))
-        if selection.skippedIncompatible > 0 {
-            outcomes.append(StageOutcome(stage: "frame-selection", succeeded: true,
-                                         fallback: "excluded-\(selection.skippedIncompatible)-incompatible"))
-        }
+        let siril = try? SirilStage(sirilBin: sirilBin)
 
-        // --- 2. Catalogue colour when available ----------------------------
-        onProgress(Progress(fraction: 0.28, status: "Balancing colour…"))
-        let colourInput: URL
-        let colourMethod: ColourMethod
-        if target.capture.isBroadband,
-           let pcc = try? siril.photometricColour(master: masterStack, workDir: workDir) {
-            colourInput = pcc
-            colourMethod = .pcc
-            outcomes.append(StageOutcome(stage: "colour", succeeded: true))
+        // Dev hook: `NEBULA_REUSE_STACK=1` re-runs everything downstream of the
+        // stack from a cached `_work/master_stack.fits`, so colour/star work can
+        // iterate with the source subs offline.
+        let cachedStack = workDir.appendingPathComponent("master_stack.fits")
+        let reuseStack = ProcessInfo.processInfo.environment["NEBULA_REUSE_STACK"] == "1"
+            && fm.fileExists(atPath: cachedStack.path)
+
+        var target: Target
+        let masterStack: URL
+        if reuseStack {
+            onProgress(Progress(fraction: 0.10, status: "Reusing cached stack…"))
+            target = reusableTarget(outDir: outDir, subsDir: subsDir, master: cachedStack)
+            masterStack = cachedStack
+            outcomes.append(StageOutcome(stage: "register+stack", succeeded: true,
+                                         fallback: "reused-cached-stack"))
+            outcomes.append(StageOutcome(stage: "resolution", succeeded: true,
+                                         fallback: "native-sampling-osc-safe"))
         } else {
-            colourInput = masterStack
-            colourMethod = .nativeWhiteBalance
-            outcomes.append(StageOutcome(stage: "colour", succeeded: true,
-                                         fallback: target.capture.isBroadband
-                                            ? "catalogue-unavailable-master-preserved"
-                                            : "narrowband-master-preserved"))
+            let selection = try SirilStage.selectLights(in: subsDir)
+            target = makeTarget(subsDir: subsDir, selection: selection)
+
+            // --- 1. Siril: compatible-filter selection, register + stack ----
+            onProgress(Progress(fraction: 0.10, status: "Registering & stacking…"))
+            guard let siril else { throw SirilStage.SirilError.notFound }
+            masterStack = try siril.stack(subsDir: subsDir, workDir: workDir, selection: selection)
+            outcomes.append(StageOutcome(stage: "register+stack", succeeded: true))
+            outcomes.append(StageOutcome(stage: "resolution", succeeded: true,
+                                         fallback: "native-sampling-osc-safe"))
+            if selection.skippedIncompatible > 0 {
+                outcomes.append(StageOutcome(stage: "frame-selection", succeeded: true,
+                                             fallback: "excluded-\(selection.skippedIncompatible)-incompatible"))
+            }
         }
 
         let rawStack = try FITSImage.read(masterStack)
-        let correctionInput = try FITSImage.read(colourInput)
         let (w, h, c) = (rawStack.width, rawStack.height, rawStack.channels)
         let masterHWC = rawStack.hwcPixels()
-        let correctionHWC = correctionInput.hwcPixels()
 
-        // --- 3. Background removal (in-process) -> the master layer ---------
+        // What the stacker actually used. Registration drops frames it can't
+        // solve and the stack filters the worst, so this is routinely 10-35%
+        // below the accepted count — report the honest figure, never the input.
+        if let cards = try? FITSImage.readHeaderCards(masterStack) {
+            if let n = Int(cards["STACKCNT"] ?? ""), n > 0 {
+                target.capture.stackedFrameCount = min(n, target.capture.frameCount)
+            }
+            if let live = Double(cards["LIVETIME"] ?? ""), live > 0 {
+                target.capture.stackedIntegrationSeconds = live
+            }
+        }
+
+        // --- 2. Background removal FIRST — the reference-pipeline order:
+        // a gradient biases the photometric colour fit (Siril itself warns
+        // "correct the image gradient first" when PCC runs on a raw master).
         try Task.checkCancellation()
-        onProgress(Progress(fraction: 0.35, status: "Removing sky gradient…"))
+        onProgress(Progress(fraction: 0.30, status: "Removing sky gradient…"))
         let backgroundCorrected: [Float]
+        var bgeRan = false
         let wantsBackground = applyBackgroundCorrection
             || ProcessInfo.processInfo.environment["NEBULA_BACKGROUND_CORRECTION"] != "0"
         if wantsBackground,
            let bge = bgeModel ?? discover("bge-ai-models", "NEBULA_BGE_MODEL") {
-            backgroundCorrected = try BgExtractor(modelPath: bge).extract(pixels: correctionHWC, h: h, w: w, c: c)
+            // GraXpert's own default smoothing (0.5): without it the background
+            // model follows real nebulosity and eats frame-filling targets.
+            backgroundCorrected = try BgExtractor(modelPath: bge)
+                .extract(pixels: masterHWC, h: h, w: w, c: c, smoothing: 0.5)
+            bgeRan = true
             outcomes.append(StageOutcome(stage: "background-removal", succeeded: true))
         } else {
-            backgroundCorrected = correctionHWC
+            backgroundCorrected = masterHWC
             outcomes.append(StageOutcome(stage: "background-removal", succeeded: true,
                                          fallback: "disabled-master-preserved"))
         }
-        let shouldBalance = applyNativeWhiteBalance && colourMethod != .pcc
-        let balanced = shouldBalance
-            ? Self.nativeWhiteBalance(backgroundCorrected, h: h, w: w, c: c,
-                                      broadband: target.capture.isBroadband)
-            : backgroundCorrected
-        // Protect strong signal from the WHOLE correction chain (PCC + BGE +
-        // white balance), relative to the raw stack. PCC's global white point
-        // is right for the sky and stars, but on an emission target it also
-        // neutralises the nebula itself — M8's H-alpha lost a third of its
-        // R/G ratio to calibration alone. Backgrounds calibrate fully; the
-        // nebula body keeps its native colour.
-        let protected = Self.protectSignal(master: masterHWC, corrected: balanced,
-                                           h: h, w: w, c: c)
-        let validation = CorrectionValidator.accept(before: masterHWC, after: protected, channels: c)
+
+        // --- 3. Catalogue colour on the gradient-free master ----------------
+        onProgress(Progress(fraction: 0.42, status: "Balancing colour…"))
+        var colourMethod = ColourMethod.nativeWhiteBalance
+        var calibrated = backgroundCorrected
+        if target.capture.isBroadband, let siril {
+            // Hand Siril the bg-removed pixels under the ORIGINAL header so the
+            // plate solve keeps its astrometry seed.
+            var solveInput = masterStack
+            if bgeRan {
+                let bgURL = workDir.appendingPathComponent("master_bg.fits")
+                if (try? FITSImage.writeReplacingPixels(template: masterStack, to: bgURL,
+                                                        hwc: backgroundCorrected,
+                                                        width: w, height: h, channels: c)) != nil {
+                    solveInput = bgURL
+                }
+            }
+            if let pcc = try? siril.photometricColour(master: solveInput, workDir: workDir),
+               let pccImage = try? FITSImage.read(pcc) {
+                // Siril normalises the largest PCC gain to 1, so calibration is
+                // always a net dimming (M 42 lost half its red flux). A single
+                // scalar restores the pre-PCC luminance scale; the calibrated
+                // channel RATIOS — the actual colour — are untouched.
+                calibrated = Self.renormaliseLuminance(reference: backgroundCorrected,
+                                                       calibrated: pccImage.hwcPixels(), c: c)
+                colourMethod = .pcc
+                outcomes.append(StageOutcome(stage: "colour", succeeded: true))
+            } else {
+                outcomes.append(StageOutcome(stage: "colour", succeeded: true,
+                                             fallback: "catalogue-unavailable-native-balance"))
+            }
+        } else {
+            outcomes.append(StageOutcome(stage: "colour", succeeded: true,
+                                         fallback: "narrowband-master-preserved"))
+        }
+        if colourMethod != .pcc && applyNativeWhiteBalance {
+            calibrated = Self.nativeWhiteBalance(calibrated, h: h, w: w, c: c,
+                                                 broadband: target.capture.isBroadband)
+        }
+        let validation = CorrectionValidator.accept(before: masterHWC, after: calibrated, channels: c)
         // A correction is only an optional alternative layer. If numerical
         // safeguards reject it, corrected becomes an exact master passthrough.
-        let correctedHWC = validation.0 ? protected : masterHWC
+        let correctedHWC = validation.0 ? calibrated : masterHWC
         if !validation.0 {
             outcomes.append(StageOutcome(stage: "correction-validation", succeeded: false,
                                          fallback: validation.1.joined(separator: ",")))
@@ -141,26 +188,66 @@ public struct Baker {
                                          fallback: "model-unavailable-master-preserved"))
         }
 
-        // --- 5. Star separation: real model or classical star-mask fallback ---
+        // --- 5. Star separation: neural model or classical mask, both GATED ---
+        // A separator that "succeeds" can still eat the subject (a galaxy is a
+        // big fuzzy star to a model; a nebula filament trips a threshold). Every
+        // candidate must pass the extended-flux validator: the wide-blur
+        // above-sky flux — the subject — has to survive in the starless layer.
         onProgress(Progress(fraction: 0.72, status: "Separating stars…"))
         var starlessHWC: [Float]?
+        var separationDetail = "separation-unavailable"
+        /// Constrain a separator's result to compact flux, then accept it if the
+        /// subject survives. The constraint is unconditional because a star
+        /// layer must contain only compact sources by definition: whatever
+        /// extended structure a separator pulled out is subject, not stars.
+        /// (StarNet routinely takes a galaxy's nucleus as one big star, which
+        /// then gets treated as a star everywhere downstream — dimmed by the
+        /// Stars slider, eroded by Star Size, whitened as a saturated core.)
+        func accepted(_ candidate: [Float], _ label: String) -> Bool {
+            let refined = Self.compactOnlyStarless(master: correctedHWC, starless: candidate,
+                                                   h: h, w: w, c: c, radius: 16)
+            let v = Self.extendedFluxRetention(master: correctedHWC, starless: refined,
+                                               h: h, w: w, c: c)
+            guard !v.meaningful || v.retention >= 0.70 else { return false }
+            starlessHWC = refined
+            separationDetail = String(format: "%@-retention=%.2f", label, min(v.retention, 1))
+            return true
+        }
         if let cmd = starnetCmd ?? ProcessInfo.processInfo.environment["NEBULA_STARNET"] ?? Self.discoverStarNet() {
             if let sep = try? runStarSeparation(cmd, masterHWC: correctedHWC, w: w, h: h, c: c, workDir: workDir) {
-                starlessHWC = sep
-                outcomes.append(StageOutcome(stage: "star-separation", succeeded: true))
+                if !accepted(sep, "model") {
+                    outcomes.append(StageOutcome(stage: "star-separation-model", succeeded: false,
+                                                 fallback: "subject-flux-lost-classical-star-mask"))
+                }
             } else {
                 outcomes.append(StageOutcome(stage: "star-separation-model", succeeded: false,
                                              fallback: "model-failed-classical-star-mask"))
             }
         }
         if starlessHWC == nil {
-            // Never an empty star layer: without a neural separator, a feathered
-            // classical mask keeps the Stars / Star Size controls functional.
-            starlessHWC = Self.classicalStarless(master: correctedHWC, detection: denoisedHWC,
-                                                 h: h, w: w, c: c)
-            outcomes.append(StageOutcome(stage: "star-separation", succeeded: true,
-                                         fallback: "classical-star-mask"))
+            _ = accepted(Self.classicalStarless(master: correctedHWC, detection: denoisedHWC,
+                                                h: h, w: w, c: c), "classical")
         }
+        if starlessHWC == nil {
+            _ = accepted(Self.classicalStarless(master: correctedHWC, detection: denoisedHWC,
+                                                h: h, w: w, c: c,
+                                                knee: 6.5, radiusCap: 4, regain: 1.5), "conservative")
+        }
+        if starlessHWC == nil {
+            // Never a dead end: fade the gentlest candidate back toward the
+            // master until the subject demonstrably survives. Star controls
+            // keep working (weaker) and the subject can no longer be destroyed.
+            var cand = Self.classicalStarless(master: correctedHWC, detection: denoisedHWC,
+                                              h: h, w: w, c: c,
+                                              knee: 6.5, radiusCap: 4, regain: 1.5)
+            for _ in 0..<4 where starlessHWC == nil {
+                for i in 0..<cand.count { cand[i] = (cand[i] + correctedHWC[i]) * 0.5 }
+                _ = accepted(cand, "scaled")
+            }
+            if starlessHWC == nil { starlessHWC = correctedHWC }
+        }
+        outcomes.append(StageOutcome(stage: "star-separation", succeeded: true,
+                                     fallback: separationDetail))
         // stars = max(master - starless, 0)
         var starsHWC = [Float](repeating: 0, count: masterHWC.count)
         for i in 0..<starsHWC.count { starsHWC[i] = max(correctedHWC[i] - starlessHWC![i], 0) }
@@ -201,6 +288,27 @@ public struct Baker {
 
     // MARK: - Target metadata from the first sub's header
 
+    /// Whether a `FILTER` header names an emission-line filter, whose data must
+    /// NOT go through photometric colour calibration.
+    ///
+    /// The Seestar's **"LP" filter is dual-narrowband** (Ha ~20 nm + OIII
+    /// ~30 nm) — it is named for what it rejects, not for a broad passband.
+    /// PCC derives a white balance from star photometry assuming a broadband
+    /// response; applied to emission-line data it scaled M 8's red by 0.55 and
+    /// took the nebula from R/G 1.82 to 1.11 — Ha rendered as grey. Narrowband
+    /// data gets background neutralisation only, so its line ratios survive.
+    static func isNarrowband(filter: String?) -> Bool {
+        let f = (filter ?? "").lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        if f.isEmpty { return false }
+        return f == "lp" || f.contains("duo") || f.contains("narrow")
+            || f.contains("ha") || f.contains("oiii")
+    }
+
+    /// Test seam for the header→`Target` classification (filter, band, profile).
+    func makeTargetForTesting(subsDir: URL, selection: SirilStage.LightSelection) -> Target {
+        makeTarget(subsDir: subsDir, selection: selection)
+    }
+
     private func makeTarget(subsDir: URL, selection: SirilStage.LightSelection) -> Target {
         let cards = selection.lights.first?.header ?? [:]
         let exposures = selection.lights.map(\.exposure).sorted()
@@ -209,9 +317,7 @@ public struct Baker {
         let object = cards["OBJECT"]
         let name = object ?? cleanName(subsDir)
         let profile = Profile.guess(filter: filter, objectType: object)
-        let lowerFilter = filter?.lowercased() ?? ""
-        let narrow = lowerFilter.contains("duo") || lowerFilter.contains("narrow")
-            || lowerFilter.contains("ha") || lowerFilter.contains("oiii")
+        let narrow = Self.isNarrowband(filter: filter)
         let capture = CaptureStats(
             frameCount: selection.lights.count, subExposureSeconds: exposure,
             totalIntegrationSeconds: selection.integrationSeconds,
@@ -220,6 +326,41 @@ public struct Baker {
             raDegrees: Double(cards["RA"] ?? ""), decDegrees: Double(cards["DEC"] ?? ""),
             sensorTemperatureC: Double(cards["CCD-TEMP"] ?? ""))
         return Target(name: name, subsPath: subsDir.path, capture: capture, profile: profile)
+    }
+
+    /// Target metadata for a `NEBULA_REUSE_STACK` re-bake, where the source
+    /// subs may be offline: the previous manifest when present, else a minimal
+    /// stand-in derived from the folder name.
+    private func reusableTarget(outDir: URL, subsDir: URL, master: URL? = nil) -> Target {
+        if let data = try? Data(contentsOf: outDir.appendingPathComponent("manifest.json")),
+           let manifest = try? Manifest(jsonData: data) {
+            // Re-derive the band from the stored filter rather than trusting the
+            // old manifest's verdict: classification rules change (the Seestar's
+            // "LP" is dual-narrowband, not broadband), and a reused bake must
+            // pick that up or it silently repeats the previous mistake.
+            var target = manifest.target
+            target.capture.isBroadband = !Self.isNarrowband(filter: target.capture.filter)
+            return target
+        }
+        // No manifest: take what the stacked master's own header knows. The
+        // filter in particular decides whether photometric calibration may run
+        // at all, so guessing "broadband" would silently mis-calibrate any
+        // duo-band stack handed to us directly.
+        let cards = master.flatMap { try? FITSImage.readHeaderCards($0) } ?? [:]
+        let filter = cards["FILTER"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let object = cards["OBJECT"]
+        let frames = Int(cards["STACKCNT"] ?? "") ?? 1
+        let exposure = Double(cards["EXPTIME"] ?? "") ?? 10
+        let capture = CaptureStats(frameCount: frames, subExposureSeconds: exposure,
+                                   totalIntegrationSeconds: Double(cards["LIVETIME"] ?? ""),
+                                   hasMixedExposures: false,
+                                   filter: filter?.isEmpty == false ? filter : nil,
+                                   isBroadband: !Self.isNarrowband(filter: filter),
+                                   raDegrees: nil, decDegrees: nil,
+                                   sensorTemperatureC: Double(cards["CCD-TEMP"] ?? ""))
+        return Target(name: object ?? cleanName(subsDir), subsPath: subsDir.path,
+                      capture: capture,
+                      profile: Profile.guess(filter: filter, objectType: object))
     }
 
     private func cleanName(_ dir: URL) -> String {
@@ -289,13 +430,22 @@ public struct Baker {
         }
         let fm = FileManager.default
         try fm.createDirectory(at: workDir, withIntermediateDirectories: true)
-        let inURL = workDir.appendingPathComponent("_starnet_in.tiff")
-        let outURL = workDir.appendingPathComponent("_starnet_out.tiff")
-        try? fm.removeItem(at: outURL)
+        // The command template goes through `bash -c` with no reliable quoting
+        // convention, and every real cache dir has a space ("M 42"). Keep the
+        // image round trip in a space-free scratch dir so any template works.
+        let scratch = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("nebula-starnet-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: scratch, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: scratch) }
+        let inURL = scratch.appendingPathComponent("starnet_in.tiff")
+        let outURL = scratch.appendingPathComponent("starnet_out.tiff")
 
         // Invertible per-channel autostretch (linear → display), matching the
         // live engine, so StarNet sees a normal-looking astrophoto.
-        let stretch = AutoStretch(base: FITSImage.fromHWC(masterHWC, width: w, height: h, channels: c))
+        // StarNet is trained on screen-stretched data, so hand it the classic
+        // 0.25 background rather than Nebula's darker finished-image default.
+        let stretch = AutoStretch(base: FITSImage.fromHWC(masterHWC, width: w, height: h, channels: c),
+                                  targetBG: 0.25)
         let sh = [stretch.shadow.0, stretch.shadow.1, stretch.shadow.2]
         let mt = [stretch.midtone.0, stretch.midtone.1, stretch.midtone.2]
         var stretched = [Float](repeating: 0, count: masterHWC.count)
@@ -312,9 +462,22 @@ public struct Baker {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/bash")
         p.arguments = ["-c", cmd]
+        // starnet2 builds resolve their weights relative to the working
+        // directory, so run from the binary's own directory when we can tell.
+        if let bin = Self.commandBinaryPath(template), fm.isExecutableFile(atPath: bin) {
+            p.currentDirectoryURL = URL(fileURLWithPath: bin).deletingLastPathComponent()
+        }
         let logURL = workDir.appendingPathComponent("star-separation.log")
         fm.createFile(atPath: logURL.path, contents: nil)
         let log = try FileHandle(forWritingTo: logURL)
+        try? log.write(contentsOf: Data((cmd + "\n").utf8))
+        var sample: [Float] = []
+        sample.reserveCapacity(stretched.count / 64 + 1)
+        var si = 0
+        while si < stretched.count { sample.append(stretched[si]); si += 64 }
+        sample.sort()
+        let p99 = sample[Int(Float(sample.count) * 0.99)]
+        try? log.write(contentsOf: Data(String(format: "input-p99=%.3f\n", p99).utf8))
         p.standardOutput = log; p.standardError = log
         try p.run()
         while p.isRunning {
@@ -351,10 +514,27 @@ public struct Baker {
         return nil
     }
 
+    /// First token of a shell command template, unquoted — used to locate the
+    /// StarNet binary so it can run from its own directory (weights live there).
+    static func commandBinaryPath(_ template: String) -> String? {
+        let t = template.trimmingCharacters(in: .whitespaces)
+        var bin = t
+        if t.hasPrefix("'") {
+            let rest = t.dropFirst()
+            guard let close = rest.firstIndex(of: "'") else { return nil }
+            bin = String(rest[..<close])
+        } else if let space = t.firstIndex(of: " ") {
+            bin = String(t[..<space])
+        }
+        return bin.hasPrefix("/") ? bin : nil
+    }
+
     // MARK: - Invertible MTF autostretch (the same closed form the shader uses)
 
     static func mtf(_ x: Float, _ m: Float) -> Float {
-        let xx = min(max(x, 0), 1), mm = min(max(m, 0.01), 0.99)
+        // The midtone floor must sit well below the ~1e-3 midtones linear astro
+        // data needs, and its ceiling near 1 so `1 - midtone` stays invertible.
+        let xx = min(max(x, 0), 1), mm = min(max(m, 0.0001), 0.9999)
         let d = (2*mm - 1)*xx - mm
         if abs(d) < 1e-6 { return xx }
         return min(max(((mm - 1)*xx) / d, 0), 1)
@@ -440,44 +620,31 @@ public struct Baker {
 
     // MARK: - Safe fallbacks
 
-    /// Background extraction on a frame-filling target subtracts real
-    /// nebulosity as "gradient" (M8's H-alpha loses ~half its red). Fade the
-    /// correction out over strong signal: gradients are a sky-level problem,
-    /// and the nebula body must keep its calibrated colour.
-    static func protectSignal(master: [Float], corrected: [Float],
-                              h: Int, w: Int, c: Int) -> [Float] {
-        guard c == 3, corrected.count == master.count else { return corrected }
-        let n = h * w
-        // Per-channel sky level from sparse medians. Signal is judged per
-        // channel: an emission nebula can triple the red channel while barely
-        // moving luminance, so a luminance test would leave it unprotected.
-        var sky = [Float](repeating: 1e-5, count: 3)
-        for ch in 0..<3 {
-            var sample: [Float] = []
-            sample.reserveCapacity(n / 16 + 1)
-            var i = ch
-            while i < n * 3 { sample.append(master[i]); i += 48 }
-            sample.sort()
-            sky[ch] = max(sample[sample.count / 2], 1e-5)
-        }
-        var ratio = [Float](repeating: 0, count: n)
-        for p in 0..<n {
-            var t: Float = 0
-            for ch in 0..<3 { t = max(t, master[p*3+ch] / sky[ch]) }
-            ratio[p] = t
-        }
-        // Blur the signal map so pixel noise can't modulate the smooth correction.
-        let smooth = boxBlur(ratio, h: h, w: w, c: 1, radius: 2)
-        var out = corrected
-        for p in 0..<n {
-            // Full correction at sky level, smoothly fading to 15% by 3.5× sky.
-            let t = min(max((smooth[p] - 1.4) / 2.1, 0), 1)
-            let keep = 1 - 0.85 * t * t * (3 - 2 * t)
-            for ch in 0..<3 {
-                let m = master[p*3+ch]
-                out[p*3+ch] = m + (corrected[p*3+ch] - m) * keep
+    /// Undo PCC's net attenuation without touching its colour: Siril scales the
+    /// largest calibration gain to 1, so every other channel is only ever
+    /// dimmed. One scalar restores the pre-calibration above-sky luminance
+    /// scale (measured robustly at P95); the calibrated channel ratios — the
+    /// actual photometric colour — pass through unchanged.
+    static func renormaliseLuminance(reference: [Float], calibrated: [Float],
+                                     c: Int) -> [Float] {
+        guard c == 3, calibrated.count == reference.count else { return calibrated }
+        func p95AboveSky(_ a: [Float]) -> Float {
+            let n = a.count / 3
+            var lums: [Float] = []
+            lums.reserveCapacity(n / 16 + 1)
+            var i = 0
+            while i < n {
+                lums.append(a[i*3] * 0.2126 + a[i*3+1] * 0.7152 + a[i*3+2] * 0.0722)
+                i += 16
             }
+            lums.sort()
+            return max(lums[Int(Float(lums.count) * 0.95)] - lums[lums.count / 2], 1e-6)
         }
+        // PCC can only have dimmed, so the factor is ≥ 1; the cap bounds a
+        // degenerate fit from ever amplifying noise more than 3×.
+        let s = min(max(p95AboveSky(reference) / p95AboveSky(calibrated), 1), 3)
+        var out = calibrated
+        for i in 0..<out.count { out[i] = min(out[i] * s, 1) }
         return out
     }
 
@@ -537,6 +704,156 @@ public struct Baker {
         for i in 0..<(h*w) { for ch in 0..<3 {
             out[i*3+ch] = min(max(commonBG + (hwc[i*3+ch] - bg[ch]) * gains[ch], 0), 1)
         } }
+        return broadband ? out : duoBandRecombine(out, h: h, w: w, c: c)
+    }
+
+    /// Recombine duo-band (Ha + OIII) data so both emission lines are legible.
+    ///
+    /// The Seestar's "LP" filter is dual-narrowband, and the sensor's response
+    /// to the two lines is wildly asymmetric. Computed from Siril's own SPCC
+    /// profiles for this exact sensor and filter (`ZWO_Seestar_S50` x
+    /// `ZWO_Seestar_LP`), a unit photon flux in each line arrives as:
+    ///
+    ///          Ha      OIII
+    ///     R [ 0.795   0.042 ]
+    ///     G [ 0.245   0.739 ]
+    ///     B [ 0.122   0.391 ]
+    ///
+    /// So pure Ha lands as RGB (1.00, 0.31, 0.15) — red collects 4.3x what the
+    /// other two do together. An untreated stack therefore renders as one flat
+    /// red *however good the data is*; the OIII structure is present but buried.
+    ///
+    /// Simply boosting green and blue — the obvious fix, and the one tried
+    /// here first — lifts Ha's **leakage** into them along with the OIII, which
+    /// washes the frame pink instead of revealing anything. So: unmix (recover
+    /// the two lines by inverting the matrix above), align their sky pedestals,
+    /// and recompose with the standard HOO weights. The measured line ratio is
+    /// rendered as-is — see the pedestal-alignment comment in the body for why
+    /// the reference tools' amplitude equalisation is deliberately NOT applied.
+    ///
+    /// A flat continuum source unmixes to Ha ≈ OIII and therefore renders
+    /// neutral — which is physically right (M 1's synchrotron interior).
+    static func duoBandRecombine(_ hwc: [Float], h: Int, w: Int, c: Int) -> [Float] {
+        guard c == 3 else { return hwc }
+        let n = h * w
+        // Least-squares inverse of the response matrix above. Verified: a pure
+        // Ha input yields (Ha 1, OIII 0), and pure OIII yields (0, 1).
+        var ha = [Float](repeating: 0, count: n)
+        var o3 = [Float](repeating: 0, count: n)
+        for p in 0..<n {
+            let r = hwc[p*3], g = hwc[p*3+1], b = hwc[p*3+2]
+            ha[p] = max(1.280 * r - 0.051 * g - 0.039 * b, 0)
+            o3[p] = max(-0.420 * r + 1.074 * g + 0.573 * b, 0)
+        }
+        func levels(_ a: [Float]) -> (median: Float, peak: Float) {
+            var s: [Float] = []
+            s.reserveCapacity(n / 8 + 1)
+            var i = 0
+            while i < n { s.append(a[i]); i += 8 }
+            s.sort()
+            return (s[s.count / 2], s[min(s.count - 1, Int(Float(s.count) * 0.995))])
+        }
+        // Align the PEDESTALS only — no amplitude boost.
+        //
+        // The reference tools (Siril's shipped script, Blanshan's
+        // NarrowbandNormalization, VeraLux) equalise OIII's amplitude to Ha's,
+        // but that is a convention for imagers who chose to shoot OIII and
+        // want to see what they captured. Applied automatically it is wrong
+        // twice over: it amplifies OIII *noise* into a teal wash on targets
+        // with little real OIII (IC 2944 went teal), and it forces every
+        // object to the same line ratio, erasing the real differences the
+        // published spectra predict (M 27 at OIII/Ha 2.45 vs M 8 at 0.20).
+        //
+        // Rendering the MEASURED ratio through the standard composition below
+        // reproduces the professional palette on its own: M 42's core
+        // (ratio ~0.97) comes out neutral-white — matching ESO's reference,
+        // which measures R/G = 1.03 there — M 27's body reads teal, and M 8 /
+        // IC 2944 stay correctly red. Pedestal alignment is kept because the
+        // two bands collect different amounts of sky (30 nm vs 20 nm), and
+        // matching medians is exactly background neutralisation.
+        let lh = levels(ha), lo = levels(o3)
+        for p in 0..<n { o3[p] = max(o3[p] - lo.median + lh.median, 0) }
+
+        // Recompose. Green carries mostly OIII with a little Ha so red regions
+        // stay warm rather than going magenta; blue is nearly pure OIII.
+        var out = [Float](repeating: 0, count: hwc.count)
+        for p in 0..<n {
+            let a = ha[p], o = o3[p]
+            out[p*3]     = min(a, 1)
+            out[p*3 + 1] = min(0.20 * a + 0.80 * o, 1)
+            out[p*3 + 2] = min(0.15 * a + 0.85 * o, 1)
+        }
+        return out
+    }
+
+    /// The star-split acceptance metric: how much of the **extended** above-sky
+    /// flux — the subject — survives in the starless layer.
+    ///
+    /// Extended flux is isolated with a morphological opening, not a blur: a
+    /// blur conserves total flux (it only spreads a star out), so in a
+    /// star-dense field a blur-based measure punishes legitimate star removal.
+    /// An opening with an element wider than any star deletes stars outright
+    /// while leaving galaxies and nebulosity essentially intact.
+    ///
+    /// `meaningful` is false when the frame has no real extended signal (an
+    /// open cluster, a bare star field), where any split is acceptable.
+    static func extendedFluxRetention(master: [Float], starless: [Float],
+                                      h: Int, w: Int, c: Int,
+                                      radius: Int = 12) -> (retention: Float, meaningful: Bool) {
+        guard c == 3, starless.count == master.count, h > 4 * radius, w > 4 * radius else {
+            return (1, false)
+        }
+        let n = h * w
+        func extended(_ a: [Float]) -> [Float] {
+            var lum = [Float](repeating: 0, count: n)
+            for i in 0..<n { lum[i] = a[i*3]*0.2126 + a[i*3+1]*0.7152 + a[i*3+2]*0.0722 }
+            return dilate(erode(lum, h: h, w: w, radius: radius), h: h, w: w, radius: radius)
+        }
+        let om = extended(master), os = extended(starless)
+        var sample: [Float] = []
+        sample.reserveCapacity(n / 16 + 1)
+        var i = 0
+        while i < n { sample.append(om[i]); i += 16 }
+        sample.sort()
+        let sky = sample[sample.count / 2]
+        // Noise floor from the same robust sample, so faint fields aren't judged
+        // on sky ripple: only flux clearly above the sky counts as subject.
+        var dev = sample.map { abs($0 - sky) }
+        dev.sort()
+        let floor = sky + 3 * 1.4826 * dev[dev.count / 2]
+        var em = 0.0, es = 0.0
+        for p in 0..<n {
+            em += Double(max(om[p] - floor, 0))
+            es += Double(max(os[p] - floor, 0))
+        }
+        let meaningful = em > Double(max(sky, 1e-6)) * 0.002 * Double(n)
+        return (em > 0 ? Float(es / em) : 1, meaningful)
+    }
+
+    /// Repair a separator that took the subject along with the stars: keep only
+    /// the **compact** part of what it removed. A morphological top-hat of the
+    /// removed flux (removed − opening(removed)) passes point-like stars intact
+    /// while an element wider than any star zeroes out galaxy/nebula structure,
+    /// so extended signal returns to the starless layer and real star removal is
+    /// preserved. This is what lets StarNet stay useful on galaxy fields, where
+    /// it otherwise treats the galaxy itself as one big star.
+    static func compactOnlyStarless(master: [Float], starless: [Float],
+                                    h: Int, w: Int, c: Int, radius: Int = 10) -> [Float] {
+        guard c == 3, starless.count == master.count, h > 4 * radius, w > 4 * radius else {
+            return starless
+        }
+        let n = h * w
+        var out = starless
+        for ch in 0..<3 {
+            var removed = [Float](repeating: 0, count: n)
+            for i in 0..<n { removed[i] = max(master[i*3+ch] - starless[i*3+ch], 0) }
+            let opened = dilate(erode(removed, h: h, w: w, radius: radius),
+                                h: h, w: w, radius: radius)
+            for i in 0..<n {
+                let compact = max(removed[i] - opened[i], 0)
+                out[i*3+ch] = max(master[i*3+ch] - compact, 0)
+            }
+        }
         return out
     }
 
@@ -547,8 +864,12 @@ public struct Baker {
     /// Stars / Star Size controls functional — the design forbids an empty
     /// star layer. `detection` is the cleanest available view of the same data
     /// (the denoised layer when present) so noise doesn't trip the threshold.
+    /// `knee`/`radiusCap`/`regain` trade removal aggressiveness for subject
+    /// safety — the bake's validator ladder calls this at descending strengths.
     static func classicalStarless(master: [Float], detection: [Float],
-                                  h: Int, w: Int, c: Int) -> [Float] {
+                                  h: Int, w: Int, c: Int,
+                                  knee: Float = 5, radiusCap: Int = 8,
+                                  regain: Float = 2) -> [Float] {
         guard c == 3, h > 32, w > 32, detection.count == master.count else { return master }
         let n = h * w
         var lum = [Float](repeating: 0, count: n)
@@ -562,7 +883,10 @@ public struct Baker {
         // shrank or dimmed. An erosion element larger than the halo removes
         // the star outright — it cannot contribute to its own background —
         // and the dilation restores the surrounding structure's extent.
-        let radius = max(6, min(w, h) / 96)
+        // Element sized to a stellar disc, not to broad structure: a 1080-wide
+        // frame gets ~5 px (the old min(w,h)/96 = 11 px read 23 px-wide nebular
+        // filaments and galaxy cores as "stars" and removed them).
+        let radius = min(max(5, min(w, h) / 200), radiusCap)
         func localBackground(_ src: [Float]) -> [Float] {
             let opened = Self.dilate(Self.erode(src, h: h, w: w, radius: radius),
                                      h: h, w: w, radius: radius)
@@ -581,13 +905,13 @@ public struct Baker {
         var mask = [Float](repeating: 0, count: n)
         for i in 0..<n {
             let t = (lum[i] - bg[i]) / sigma
-            let x = min(max((t - 3.5) / 6.5, 0), 1)
+            let x = min(max((t - knee) / 6.0, 0), 1)
             mask[i] = x * x * (3 - 2 * x)
         }
         // Blur + regain ≈ dilate-and-feather: the halo around each star is
         // removed too, with no hard edge where the replacement begins.
         let feathered = boxBlur(mask, h: h, w: w, c: 1, radius: 2)
-        for i in 0..<n { mask[i] = min(feathered[i] * 5, 1) }
+        for i in 0..<n { mask[i] = min(feathered[i] * regain, 1) }
         var out = master
         for ch in 0..<3 {
             var chan = [Float](repeating: 0, count: n)
@@ -601,17 +925,27 @@ public struct Baker {
     }
 
     /// Separable sliding-window minimum (greyscale erosion), single channel.
+    /// The window is clamped at the edges (it shrinks rather than padding), and
+    /// each pass runs in O(pixels) via a monotonic deque — the naive form was
+    /// O(pixels × radius), which dominated bake time at useful element sizes.
     static func erode(_ src: [Float], h: Int, w: Int, radius: Int) -> [Float] {
+        guard radius > 0 else { return src }
         func pass(_ s: [Float], length: Int, count: Int, stride: Int, base: (Int) -> Int) -> [Float] {
             var out = s
+            var deque = [Int](repeating: 0, count: length)   // indices, values ascending
             for line in 0..<count {
                 let b = base(line)
+                var head = 0, tail = 0, next = 0
                 for i in 0..<length {
-                    var m = s[b + i*stride]
-                    for d in max(0, i-radius)...min(length-1, i+radius) {
-                        m = min(m, s[b + d*stride])
+                    let hi = min(length - 1, i + radius)
+                    while next <= hi {
+                        let v = s[b + next*stride]
+                        while tail > head && s[b + deque[tail-1]*stride] >= v { tail -= 1 }
+                        deque[tail] = next; tail += 1; next += 1
                     }
-                    out[b + i*stride] = m
+                    let lo = i - radius
+                    while deque[head] < lo { head += 1 }
+                    out[b + i*stride] = s[b + deque[head]*stride]
                 }
             }
             return out

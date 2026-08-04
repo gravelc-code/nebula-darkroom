@@ -35,7 +35,7 @@ final class BakeRunner {
               FileManager.default.fileExists(atPath: dir.appendingPathComponent("corrected.fits").path),
               let data = try? Data(contentsOf: dir.appendingPathComponent("manifest.json")),
               let manifest = try? NebulaCore.Manifest(jsonData: data) else { return false }
-        return manifest.stageOutcomes.contains { $0.stage == "pipeline-v6" && $0.succeeded }
+        return manifest.pipelineVersion == Baker.pipelineVersion
     }
 
     /// Bake `subsDir` into a layers dir, streaming progress via `onProgress`
@@ -45,6 +45,13 @@ final class BakeRunner {
               onProgress: @MainActor (Progress) -> Void) async -> Outcome {
         let out = Self.cacheDir(forTarget: target)
         if Self.hasCurrentPipeline(in: out) {
+            onProgress(Progress(fraction: 1.0, status: "Loaded cached bake"))
+            return .success(out)
+        }
+        // A stale-pipeline cache is still a complete image. If the source subs
+        // are offline, open it as-is rather than deleting layers we cannot
+        // rebuild — the target re-develops next time the source is reachable.
+        if !FileManager.default.fileExists(atPath: subsDir.path), Self.hasAllLayers(in: out) {
             onProgress(Progress(fraction: 1.0, status: "Loaded cached bake"))
             return .success(out)
         }

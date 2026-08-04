@@ -25,20 +25,38 @@ final class NebulaEngineTests: XCTestCase {
         XCTAssertEqual(crop.rgba[(1*3+2)*4], 24)
     }
 
-    func testAutoStretchUsesIndependentChannelStatistics() {
+    /// The base stretch takes its black point per channel (that is what
+    /// neutralises the sky) but its midtone ONCE, from luminance.
+    ///
+    /// Stretching each channel to its own target is what an unlinked
+    /// autostretch does, and on emission data it destroys the colour rather
+    /// than merely shifting the balance: the MTF saturates, so the channel
+    /// carrying the most signal is compressed hardest. A real M 8 pixel at
+    /// R/G 1.83 came back at 0.91 — a red nebula rendered faintly blue.
+    func testAutoStretchIsColourPreserving() {
         var rgba = [Float](repeating: 1, count: 80*80*4)
         for i in 0..<(80*80) {
+            // Distinct per-channel pedestals AND a strongly red subject.
             let v = Float(i % 80) / 800 + 0.01
-            rgba[i*4] = v; rgba[i*4+1] = v*0.8; rgba[i*4+2] = v*0.6
+            rgba[i*4] = v * 1.8 + 0.004; rgba[i*4+1] = v + 0.002; rgba[i*4+2] = v * 0.9 + 0.001
         }
         let stretch = AutoStretch(base: FITSImage(width: 80, height: 80, channels: 3, rgba: rgba))
-        // Low-noise channels may all clamp their shadow to zero; independent
-        // channel statistics are still reflected in their distinct midtones.
-        XCTAssertGreaterThanOrEqual(stretch.shadow.0, 0)
-        XCTAssertGreaterThanOrEqual(stretch.shadow.1, 0)
-        XCTAssertGreaterThanOrEqual(stretch.shadow.2, 0)
-        XCTAssertNotEqual(stretch.midtone.0, stretch.midtone.1)
-        XCTAssertNotEqual(stretch.midtone.1, stretch.midtone.2)
+        // One linked midtone — the whole point.
+        XCTAssertEqual(stretch.midtone.0, stretch.midtone.1)
+        XCTAssertEqual(stretch.midtone.1, stretch.midtone.2)
+        XCTAssertGreaterThan(stretch.midtone.0, 0)
+
+        // Applying it the way the shader does preserves the hue: a bright
+        // pixel keeps its channel ratio instead of collapsing toward grey.
+        let px: (Float, Float, Float) = (0.09, 0.05, 0.045)
+        let n = (max(px.0 - stretch.shadow.0, 0) / (1 - stretch.shadow.0),
+                 max(px.1 - stretch.shadow.1, 0) / (1 - stretch.shadow.1),
+                 max(px.2 - stretch.shadow.2, 0) / (1 - stretch.shadow.2))
+        let lum = n.0 * 0.2126 + n.1 * 0.7152 + n.2 * 0.0722
+        let scale = AutoStretch.mtf(lum, stretch.midtone.0) / lum
+        let ratioBefore = n.0 / n.1, ratioAfter = (n.0 * scale) / (n.1 * scale)
+        XCTAssertEqual(ratioAfter, ratioBefore, accuracy: 1e-5)
+        XCTAssertGreaterThan(ratioAfter, 1.4, "red subject must stay red")
     }
 
     /// Regression: the starless/denoised deltas must not be faded by the

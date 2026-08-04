@@ -24,6 +24,12 @@ public struct CaptureStats: Codable, Equatable, Sendable {
     public var decDegrees: Double?
     /// Sensor temperature in °C, if present.
     public var sensorTemperatureC: Double?
+    /// Frames that actually survived registration and stacking (`STACKCNT`).
+    /// Always ≤ `frameCount`: registration drops frames it cannot solve and the
+    /// stack filters the worst. Older manifests omit this.
+    public var stackedFrameCount: Int?
+    /// Integration time actually stacked (`LIVETIME`), in seconds.
+    public var stackedIntegrationSeconds: Double?
 
     public init(frameCount: Int,
                 subExposureSeconds: Double,
@@ -33,7 +39,9 @@ public struct CaptureStats: Codable, Equatable, Sendable {
                 isBroadband: Bool = true,
                 raDegrees: Double? = nil,
                 decDegrees: Double? = nil,
-                sensorTemperatureC: Double? = nil) {
+                sensorTemperatureC: Double? = nil,
+                stackedFrameCount: Int? = nil,
+                stackedIntegrationSeconds: Double? = nil) {
         self.frameCount = frameCount
         self.subExposureSeconds = subExposureSeconds
         self.totalIntegrationSeconds = totalIntegrationSeconds
@@ -43,11 +51,21 @@ public struct CaptureStats: Codable, Equatable, Sendable {
         self.raDegrees = raDegrees
         self.decDegrees = decDegrees
         self.sensorTemperatureC = sensorTemperatureC
+        self.stackedFrameCount = stackedFrameCount
+        self.stackedIntegrationSeconds = stackedIntegrationSeconds
     }
 
-    /// Total integration time in seconds.
+    /// Total integration time in seconds — what actually reached the stack when
+    /// the stacker reported it, so the figure shown is never an over-claim.
     public var integrationSeconds: Double {
-        totalIntegrationSeconds ?? Double(frameCount) * subExposureSeconds
+        stackedIntegrationSeconds ?? totalIntegrationSeconds ?? Double(frameCount) * subExposureSeconds
+    }
+
+    /// Plain-language note when frames were dropped between import and stack,
+    /// e.g. "Stacked 112 of 126 frames". `nil` when everything was used.
+    public var stackedFramesNote: String? {
+        guard let stacked = stackedFrameCount, stacked < frameCount else { return nil }
+        return "Stacked \(stacked) of \(frameCount) frames"
     }
 
     /// Human-readable integration time, e.g. "48 min" or "1 h 12 min".
@@ -64,7 +82,8 @@ public struct CaptureStats: Codable, Equatable, Sendable {
             ? String(Int(subExposureSeconds))
             : String(subExposureSeconds)
         let band = isBroadband ? "broadband" : "narrowband"
-        let frames = hasMixedExposures ? "\(frameCount) mixed exposures" : "\(frameCount) × \(sub)s"
+        let used = stackedFrameCount ?? frameCount
+        let frames = hasMixedExposures ? "\(used) mixed exposures" : "\(used) × \(sub)s"
         return "\(integrationDescription) integrated · \(frames) · \(band)"
     }
 }
@@ -74,6 +93,7 @@ extension CaptureStats {
     private enum CodingKeys: String, CodingKey {
         case frameCount, subExposureSeconds, totalIntegrationSeconds, hasMixedExposures
         case filter, isBroadband, raDegrees, decDegrees, sensorTemperatureC
+        case stackedFrameCount, stackedIntegrationSeconds
     }
 
     public init(from decoder: Decoder) throws {
@@ -87,6 +107,8 @@ extension CaptureStats {
         raDegrees = try c.decodeIfPresent(Double.self, forKey: .raDegrees)
         decDegrees = try c.decodeIfPresent(Double.self, forKey: .decDegrees)
         sensorTemperatureC = try c.decodeIfPresent(Double.self, forKey: .sensorTemperatureC)
+        stackedFrameCount = try c.decodeIfPresent(Int.self, forKey: .stackedFrameCount)
+        stackedIntegrationSeconds = try c.decodeIfPresent(Double.self, forKey: .stackedIntegrationSeconds)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -100,6 +122,8 @@ extension CaptureStats {
         try c.encodeIfPresent(raDegrees, forKey: .raDegrees)
         try c.encodeIfPresent(decDegrees, forKey: .decDegrees)
         try c.encodeIfPresent(sensorTemperatureC, forKey: .sensorTemperatureC)
+        try c.encodeIfPresent(stackedFrameCount, forKey: .stackedFrameCount)
+        try c.encodeIfPresent(stackedIntegrationSeconds, forKey: .stackedIntegrationSeconds)
     }
 }
 
