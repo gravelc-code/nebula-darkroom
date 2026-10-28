@@ -5,21 +5,33 @@ import NebulaCore
 import NebulaEngine
 import NebulaAI
 
-// nebula-render <layers_dir> <base> <out.png> [slider=value ...]
+// nebula-render <layers_dir> <default|neutral> <out.png> [key=value ...]
 //   layers_dir : a bake output dir with master/denoised/starless/stars .fits
-//   base       : default (the developed opening look) | neutral (truthful)
+//   base look  : default (the developed opening look) | neutral (truthful "before").
+//                There are no presets any more; `auto` is accepted as an alias of
+//                neutral for old scripts, and natural/vivid/... are rejected.
 //   out.png    : where to write the rendered frame
 //   slider=v   : optional overrides (0…1), e.g. detail=1 denoise=0 background=0.9
+//   upscale=n  : export at 1x or 2x
 //   enhance=s  : AI super-resolution at strength s (needs NEBULA_SUPERRES_MODEL or
 //                ~/Library/Application Support/Nebula/Models/superres.onnx)
 //
 // Headless export path — the same ChainRenderer the live app uses, so the PNG
 // here equals what the interactive preview shows.
 
+let usage = """
+usage: nebula-render <layers_dir> <default|neutral> <out.png> [key=value ...]
+  default      the developed opening look (what a target opens on)
+  neutral      the truthful, unstyled "before" (alias: auto)
+  key=value    slider overrides 0…1 (\(Slider.allCases.map(\.rawValue).joined(separator: ", "))),
+               upscale=1|2, enhance=0…1 (AI super-resolution; needs a superres model)
+
+"""
+
 let args = CommandLine.arguments
+if args.contains("-h") || args.contains("--help") { print(usage, terminator: ""); exit(0) }
 guard args.count >= 4 else {
-    FileHandle.standardError.write(Data(
-        "usage: nebula-render <layers_dir> <default|neutral> <out.png> [slider=value ...]\n".utf8))
+    FileHandle.standardError.write(Data(usage.utf8))
     exit(2)
 }
 let dir = URL(fileURLWithPath: args[1])
@@ -28,7 +40,8 @@ switch args[2] {
 case "default": baseLook = .default
 case "neutral", "auto": baseLook = .neutral
 default:
-    FileHandle.standardError.write(Data("unknown base look '\(args[2])' (use default|neutral)\n".utf8))
+    FileHandle.standardError.write(Data(
+        "unknown base look '\(args[2])' (use default|neutral; presets were removed)\n\n\(usage)".utf8))
     exit(2)
 }
 let out = URL(fileURLWithPath: args[3])
@@ -42,12 +55,12 @@ for kv in args.dropFirst(4) {
     if parts.count == 2, parts[0] == "upscale", let value = Int(parts[1]), (1...2).contains(value) {
         exportScale = value; continue
     }
-    if parts.count == 2, parts[0] == "enhance", let value = Float(parts[1]) {
+    if parts.count == 2, parts[0] == "enhance", let value = Float(parts[1]), value.isFinite {
         enhanceStrength = min(max(value, 0), 1); continue
     }
     guard parts.count == 2, let s = Slider(rawValue: String(parts[0])),
           let v = Double(parts[1]) else {
-        FileHandle.standardError.write(Data("bad override '\(kv)'\n".utf8)); exit(2)
+        FileHandle.standardError.write(Data("bad override '\(kv)'\n\n\(usage)".utf8)); exit(2)
     }
     look[s] = v
 }

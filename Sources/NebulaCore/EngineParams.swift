@@ -15,6 +15,7 @@ import Foundation
 ///   → saturation → vibrance → tint(green↔magenta) → warmth(blue↔amber)
 ///   → shadowNeutralize → bilateral(smoothStrength)
 ///   → localContrast(detailStrength) + structureBoost(structureStrength)
+///       (both measured on the star-free development, so stars never halo)
 ///   → screen(image, starLayerBloom(starD) · starWeight)   // Star Size only
 /// ```
 /// Star presence is linear in the real star flux, so Stars=1 reconstructs the
@@ -64,9 +65,15 @@ public struct EngineParams: Equatable, Sendable {
     /// cast heavy red light-pollution leaves in the faint end after calibration.
     public var warmth: Float
     /// How strongly to pull deep-shadow colour toward neutral grey. Faint-signal
-    /// colour is noise-dominated, so a gentle always-on neutralisation removes the
+    /// colour is noise-dominated, so a gentle neutralisation removes the
     /// blue-green shadow cast without touching real colour above the noise floor.
     public var shadowNeutralize: Float
+    /// Strength (0…1) of the cosmetic finishing stages that have no slider of
+    /// their own — the light SCNR kept at neutral Tint and the whitening of
+    /// saturated star cores. They fade in with Background's first phase (the
+    /// gradient-correction blend), so the look is fully finished from
+    /// Background 60 up and fully truthful at Background 0.
+    public var finishing: Float
     /// Star layer presence in the final screen recombine.
     public var starWeight: Float
     /// GHS strength (D) applied to the star layer — controls apparent star size.
@@ -141,7 +148,16 @@ public struct EngineParams: Equatable, Sendable {
         // Gentle shadow neutralisation around the sky floor, a little stronger as
         // the user cleans the Background. Kept mild — the colour calibration owns
         // the overall balance; this only stops noise chroma pooling in the sky.
-        shadowNeutralize = 0.25 + background * 0.25
+        //
+        // It, the neutral-Tint SCNR floor and star-core whitening are finishing
+        // stages, and `LookState.neutral` (Background 0) promises "every
+        // creative and destructive stage off … it must never alter real
+        // pixels". All three used to stay on there (0.25 / 0.25 / always), so
+        // they now fade in with the gradient-correction blend — the phase of
+        // Background that already means "raw master → finished sky". At
+        // Background ≥ 60 the blend is exactly 1 and every value is unchanged.
+        finishing = correctionBlend
+        shadowNeutralize = correctionBlend * (0.25 + background * 0.25)
 
         // Stars recombine weight; Star Size is bidirectional around a neutral
         // midpoint: below 50 tightens the real star flux (shrink), above 50

@@ -5,17 +5,45 @@ Snapshot of progress so work can resume on another machine. Full roadmap is in
 [`seestar-autoprocess-design.md`](seestar-autoprocess-design.md); the executable
 plan lives outside the repo at `~/.claude/plans/have-a-look-at-floating-narwhal.md`.
 
-## Where things stand
+This is a chronological log: older sections describe the code *as it was*.
+Start with **Current state**; sections marked *historical* are kept for context.
+
+## Current state (2026-10-27)
+
+- **Pipeline:** native Swift bake (`NebulaBake`: Siril subprocess + in-process
+  onnxruntime on the **CPU EP**) → **five** float layers (`master · corrected ·
+  denoised · starless · stars`) + `manifest.json` → Metal engine.
+- **Look:** **11 sliders** (Glow, Saturation, Vibrance, Tint, Warmth, Stars ·
+  Refine: Contrast, Background, Detail, Star Size, Denoise); `LookState` is 11
+  floats; **no presets** — `LookState.default` + Reset. `nebula-render` takes
+  `default|neutral`.
+- **Models:** GraXpert's bge/denoise are **never bundled** (read from the
+  user's GraXpert install); StarNet is used only if the user installed it
+  (`NEBULA_STARNET`, or `starnet2` auto-discovered in `/usr/local/bin`,
+  `/opt/homebrew/bin`, `/usr/bin`). Only Real-ESRGAN x2 ships.
+- **Packaging:** app ~206 MB, DMG ~127 MB (onnxruntime is linked statically;
+  the unused 78 MB framework copy was dropped). Licence texts in
+  `Resources/Licenses` + the DMG; `fetch-sources.sh` builds the per-release
+  GPL source tarball; `verify-bundle.sh` checks the closure and every
+  Mach-O's signature.
+- **Signing:** the last release build is **Developer ID signed** (hardened
+  runtime + timestamp on all Mach-Os) but **not yet notarised** — next step is
+  the `docs/RELEASING.md` flow (`notarize.sh app` → `build-dmg.sh` →
+  `notarize.sh dmg` → attach DMG + sources tarball).
+- **Tests:** `scripts/swift-xcode.sh test --scratch-path /tmp/nebula-build`
+  (Core, Engine, AI, Bake, App targets; the count changes — don't hard-code it).
+
+## Where things stand (phase log)
 
 | Phase | Status |
 |-------|--------|
 | **−1 · Scaffolding** | ✅ Done & tested |
 | **0 · Prove the bake** | ✅ **Acceptance met.** Proven end-to-end on real subs (M83, 67×30s) with real GraXpert (bg+denoise) + StarNet (separation); decisively beat the Seestar JPEG. Recipe below. |
-| **1 · Metal engine** | ✅ **Done.** `NebulaEngine` (shared) drives a headless CLI (`nebula-render`) and a live SwiftUI app (`NebulaApp`): 120fps `MTKView` loop, 8 sliders, presets, in-app Export (**16-bit PNG**, no banding), mipmapped faithful preview, before/after divider. Real star-layer stretch + native bilateral Denoise. Deferred by design: **tiled export** — not needed, a 1080×1920 frame renders whole in one pass (revisit only for mosaics / input-streaming); **exact published GHS** — a *look* change, folded into look-tuning (deferred to last per user). |
-| **2 · Native AI** | 🟢 **bg-removal + denoise now run natively in-process.** GraXpert's ONNX models (bge 1.0.1, denoise 3.0.2) are driven via **onnxruntime** (SwiftPM `OnnxRuntimeBindings`, pinned 1.19.2) — Swift ports in `Sources/NebulaAI` (`Denoiser`, `BgExtractor`) match GraXpert bit-exactly (denoise 1.9e-9) / visually (bg ~6e-5). Exposed as a `nebula-ai` FITS-in/out CLI that the bake prefers over GraXpert.app (`prototype/nebula-bake.sh`), so the external app is no longer required. **Runtime decision: ORT, not a converted `.mlmodel`** — coremltools 9 can't ingest ONNX; ORT runs the same models on the ANE/GPU via its CoreML EP (see `prototype/ai_native/README.md`). Speed: runs on ORT's **CPU EP** — denoise ~2.3 min/frame, comparable to GraXpert's own runtime (its from-master bg+denoise took ~1:51). **CoreML EP is a dead end for these models** (denoise graph won't compile — Espresso broadcast error; bge is *slower* on CoreML than CPU due to compile overhead); a future ~30% win is tile-batching. Remaining: **StarNet** star-separation still subprocess/fallback. |
+| **1 · Metal engine** | ✅ **Done.** `NebulaEngine` (shared) drives a headless CLI (`nebula-render`) and a live SwiftUI app (`NebulaApp`): 120fps `MTKView` loop, 8 sliders + presets at the time (now 11 sliders, no presets), in-app Export (**16-bit PNG**, no banding), mipmapped faithful preview, before/after divider. Real star-layer stretch + native bilateral Denoise. Deferred by design: **tiled export** — not needed, a 1080×1920 frame renders whole in one pass (revisit only for mosaics / input-streaming); **exact published GHS** — a *look* change, folded into look-tuning (deferred to last per user). |
+| **2 · Native AI** | 🟢 **bg-removal + denoise now run natively in-process.** GraXpert's ONNX models (bge 1.0.1, denoise 3.0.2) are driven via **onnxruntime** (SwiftPM `OnnxRuntimeBindings`, pinned 1.19.2) — Swift ports in `Sources/NebulaAI` (`Denoiser`, `BgExtractor`) match GraXpert bit-exactly (denoise 1.9e-9) / visually (bg ~6e-5). Exposed as a `nebula-ai` FITS-in/out CLI that the bake prefers over GraXpert.app (`prototype/nebula-bake.sh`), so the external app is no longer required. **Runtime decision: ORT, not a converted `.mlmodel`** — coremltools 9 can't ingest ONNX; ORT's CoreML EP was evaluated for ANE/GPU (see `prototype/ai_native/README.md`) and rejected, below. Speed: runs on ORT's **CPU EP** — denoise ~2.3 min/frame, comparable to GraXpert's own runtime (its from-master bg+denoise took ~1:51). **CoreML EP is a dead end for these models** (denoise graph won't compile — Espresso broadcast error; bge is *slower* on CoreML than CPU due to compile overhead); a future ~30% win is tile-batching. Remaining: **StarNet** star-separation still subprocess/fallback. |
 | **3 · Robust bake orchestrator** | 🟢 **Native Swift bake, wired into the app.** `Sources/NebulaBake` (`SirilStage` + `Baker`) selects a single compatible filter group, uses two-pass/COG registration, attempts catalogue PCC with native neutralisation fallback, then runs **background-removal + denoise in-process** via NebulaAI. Star separation prefers the pluggable `NEBULA_STARNET` hook and otherwise uses a feathered classical star mask—never an empty layer. The v2 renderer uses the actual denoised layer, linked-luminance stretching, protected highlights, and subject-aware framing. Validated end-to-end on synthetic M42 and 126-frame mixed-session M83. |
-| **4 · SwiftUI app** | 🟢 **Substantially done.** `NebulaApp` is now a photo-app, not a debug panel: **home** (a real **Library grid** of previously-developed targets — finished-look thumbnails rendered through the *same* GPU chain, disk-cached in each bake dir; drop / "＋ Develop" for new ones) → **baking** (live progress, streamed from the bake subprocess, per-target cached for instant re-open) → **editing** (the Phase-1 hero + 8 sliders + 16-bit Export) → the "Library" button returns to the grid. A folder that's already a bake dir opens straight into the editor. Remaining: watch mode (Phase 5), look-tuning polish. |
-| **5 · Watch mode + DMG** | 🟢 **Fully self-contained app + watch mode done.** `scripts/build-app.sh` assembles `Nebula.app` with **everything bundled — no external tools**: release exe, `onnxruntime.framework`, the ONNX models (`Resources/Models`), and **Siril + its 93-dylib closure** (`Resources/siril`; dylibbundler + a static dep-closure loop for versioned-name stragglers + LC_RPATH dedupe). Verified: bundled Siril runs the full convert/register/stack under `env -i` (zero Homebrew). Discovery is bundle-aware (`Bundle.main` for Siril + models), so a shipped app needs no `brew install siril` and no GraXpert.app. **Watch mode** (`FolderWatcher`): a "Watch Folder…" toggle auto-develops new `_sub` folders in the background + posts a thumbnail notification. **DMG:** `scripts/build-dmg.sh` produces a 694 MB drag-to-Applications `Nebula.dmg` (verified: mounts, valid bundle). Only remaining: **notarisation** (Apple Developer ID) — the DMG is unsigned/ad-hoc, so first launch on another Mac is right-click → Open. |
+| **4 · SwiftUI app** | 🟢 **Substantially done.** `NebulaApp` is now a photo-app, not a debug panel: **home** (a real **Library grid** of previously-developed targets — finished-look thumbnails rendered through the *same* GPU chain, disk-cached in each bake dir; drop / "＋ Develop" for new ones) → **baking** (live progress, streamed from the bake subprocess, per-target cached for instant re-open) → **editing** (the Phase-1 hero + sliders + 16-bit Export) → the "Library" button returns to the grid. A folder that's already a bake dir opens straight into the editor. Remaining: watch mode (Phase 5), look-tuning polish. |
+| **5 · Watch mode + DMG** | 🟢 **Fully self-contained app + watch mode done.** `scripts/build-app.sh` assembles `Nebula.app` with **everything bundled — no external tools**: release exe, `onnxruntime.framework`, the ONNX models (`Resources/Models` — *GraXpert's were dropped on 2026-07-12 and the static framework copy on 2026-10-27; see Current state*), and **Siril + its 93-dylib closure** (`Resources/siril`; dylibbundler + a static dep-closure loop for versioned-name stragglers + LC_RPATH dedupe). Verified: bundled Siril runs the full convert/register/stack under `env -i` (zero Homebrew). Discovery is bundle-aware (`Bundle.main` for Siril + models), so a shipped app needs no `brew install siril` and no GraXpert.app. **Watch mode** (`FolderWatcher`): a "Watch Folder…" toggle auto-develops new `_sub` folders in the background + posts a thumbnail notification. **DMG:** `scripts/build-dmg.sh` produced a 694 MB drag-to-Applications `Nebula.dmg` at the time (now ~127 MB). Only remaining: **notarisation** — builds are now Developer ID signed (see Current state). |
 
 ### Phase 0 real-AI recipe (dev-only tools, reproduced 2026-07-11)
 - **Siril**: `convert -debayer` (mandatory for Seestar CFA) → register → stack → native colour.
@@ -31,9 +59,9 @@ plan lives outside the repo at `~/.claude/plans/have-a-look-at-floating-narwhal.
 
 ### `Sources/NebulaCore/` — pure, tested core (SwiftPM library)
 The single source of truth shared by engine, UI, and manifest. No Metal/Siril/UI deps.
-- `Slider.swift` — 8 controls, labels, headline/advanced split, `actsOn` layer map.
-- `LookState.swift` — the ~8 normalised floats; flat stable `Codable`; clamped.
-- `Preset.swift` — Auto/Natural/Vivid/Deep (values from the mockup).
+- `Slider.swift` — 11 controls, labels, headline/Refine split, `actsOn` layer map.
+- `LookState.swift` — the 11 normalised floats; flat stable `Codable`; clamped; `.default` + `.neutral`.
+- ~~`Preset.swift`~~ — removed with the presets (0479291).
 - `Profile.swift` — Galaxy/Broadband/Narrowband/Cluster + per-type initial look + header `guess()`.
 - `EngineParams.swift` — pure slider→shader-param mapping (GHS D/SP, black point, saturation, star weight/size). **This is what Phase 1's Metal shaders consume.**
 - `Target.swift` / `CaptureStats` — capture metadata + placard string.
@@ -45,14 +73,14 @@ Proves the Siril seam before it's ported to Swift (Phase 3). See `prototype/READ
 - `nebula_proto/{headers,siril,ai,manifest}.py` — the four bake stages.
 - `make_synthetic.py` — synthetic subs/master for plumbing tests.
 
-### Tests — 19 passing
+### Tests — run `swift test` (count grows; 19 at this snapshot)
 `Tests/NebulaCoreTests/` incl. `ManifestFixtureTests` which decodes a **real
 Siril-produced** `manifest.json` fixture, proving Python↔Swift schema agreement.
 
 ## How to resume on a new machine
 
 ```bash
-# Prereqs: Xcode 26+ / Swift 6+, Homebrew.
+# Prereqs: full Xcode 16+ (Swift 6), Homebrew.
 git clone <repo> && cd seestar
 
 # 1. Core library + tests
@@ -96,8 +124,8 @@ prototype/.venv/bin/python prototype/bake.py prototype/synthetic/M42_subs --out 
 ## Running the Metal engine (Phase 1)
 ```bash
 swift build --product nebula-render --scratch-path /tmp/nebula-build
-/tmp/nebula-build/debug/nebula-render <bake_out_dir> vivid out.png
-# <bake_out_dir> = a bake dir with master/denoised/starless/stars .fits
+/tmp/nebula-build/debug/nebula-render <bake_out_dir> default out.png   # or: neutral
+# <bake_out_dir> = a bake dir with the five layer .fits + manifest.json
 ```
 Engine = `Sources/NebulaRender/`. Same shaders drive the live view + 16-bit export.
 
@@ -107,6 +135,9 @@ swift build --product NebulaApp --scratch-path /tmp/nebula-build
 /tmp/nebula-build/debug/NebulaApp            # home: Library grid / drop a "…_subs" folder
 /tmp/nebula-build/debug/NebulaApp <folder>   # or open a subs folder / bake dir directly
 ```
+*Historical (Phase-4 prototype wiring, replaced by the native `Baker` — the app
+no longer shells out to Python or GraXpert.app; models come from GraXpert's
+cache, StarNet from `NEBULA_STARNET` or a discovered `starnet2`):*
 **AI tools ("simple to install"):** the app **auto-discovers GraXpert** at the
 standard `/Applications/GraXpert.app` (drag-install the 3.0.2 arm64 DMG —
 `BakeRunner.toolEnvironment()`), so background-removal + denoise "just work" with
@@ -122,7 +153,7 @@ env-configured AI wrappers in **`prototype/aitools/`** (`gx_bg.sh`, `gx_denoise.
 so re-opening a target is instant. The bake driver lives in
 `Sources/NebulaApp/BakeRunner.swift` — the one file Phase 3 replaces.
 
-## Immediate next steps
+## Immediate next steps *(historical, 2026-07 — all done except notarisation; see Current state)*
 1. **Phase 4 · the real app** — evolve `NebulaApp` from debug panel into the
    photo-app hero UI (import a `_subs` folder → bake → open on the finished
    image), watch mode, polish. Or finish Phase 1 tail (tiled export, exact GHS).
@@ -134,8 +165,8 @@ so re-opening a target is instant. The bake driver lives in
 ## Blocked-on-assets checklist
 - [x] Real Seestar `<Target>_subs/` FITS lights — copied from the Seestar's MyWorks share
 - [x] GraXpert + StarNet binaries (Phase 0 real AI) — GraXpert 3.0.2 DMG + StarNetPro's starnet2
-- [ ] GraXpert/StarNet **ONNX weights** for in-process CoreML (Phase 2)
-- [ ] Apple Developer ID for notarisation (Phase 5)
+- [x] GraXpert **ONNX weights** in-process (via onnxruntime, not CoreML; read from the user's GraXpert install, never bundled)
+- [x] Apple Developer ID — builds are Developer ID signed; **notarisation still to run** (`scripts/notarize.sh`)
 
 ## 2026-07-12 · Star fix + open-source release prep
 

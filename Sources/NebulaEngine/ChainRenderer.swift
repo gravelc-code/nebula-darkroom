@@ -35,8 +35,22 @@ public struct EngineParamsGPU {
     var midtone0: Float; var midtone1: Float; var midtone2: Float
     var starShadow0: Float; var starShadow1: Float; var starShadow2: Float
     var starMidtone0: Float; var starMidtone1: Float; var starMidtone2: Float
+    /// GHS shape constants — injected from `GHS` so the shader and its CPU
+    /// mirror share ONE source (they used to be literals in the shader).
+    var ghsB: Float
+    var ghsHP: Float
+    /// Cosmetic finishing strength (`EngineParams.finishing`).
+    var finishing: Float
 
-    public init(_ p: EngineParams, auto a: AutoStretch, star s: StarStretch) {
+    /// - Parameter master: the auto stretch measured on the MASTER end of the
+    ///   Background blend. Below Background 60 the shader renders
+    ///   `mix(master, corrected, correctionBlend)`, so the stretch is blended
+    ///   the same way: each end is then measured on the layer actually
+    ///   rendered there (the HANDOFF invariant), and at full correction
+    ///   (Background ≥ 60) the values are exactly `auto`'s. `nil` = no separate
+    ///   corrected layer, so `auto` already describes the master.
+    public init(_ p: EngineParams, auto a: AutoStretch, master m: AutoStretch? = nil,
+                star s: StarStretch) {
         denoiseBlend = p.denoiseBlend; smoothStrength = p.smoothStrength
         correctionBlend = p.correctionBlend
         blackPoint = p.blackPoint
@@ -48,33 +62,66 @@ public struct EngineParamsGPU {
         autoSky = a.displaySky
         shadow0 = a.shadow.0; shadow1 = a.shadow.1; shadow2 = a.shadow.2
         midtone0 = a.midtone.0; midtone1 = a.midtone.1; midtone2 = a.midtone.2
+        if let m {
+            // x·(1−t) + y·t is exactly y at t = 1, so Background ≥ 60 renders
+            // bit-for-bit as before.
+            let t = min(max(p.correctionBlend, 0), 1)
+            func blend(_ x: Float, _ y: Float) -> Float { x * (1 - t) + y * t }
+            autoSky = blend(m.displaySky, a.displaySky)
+            shadow0 = blend(m.shadow.0, a.shadow.0)
+            shadow1 = blend(m.shadow.1, a.shadow.1)
+            shadow2 = blend(m.shadow.2, a.shadow.2)
+            midtone0 = blend(m.midtone.0, a.midtone.0)
+            midtone1 = blend(m.midtone.1, a.midtone.1)
+            midtone2 = blend(m.midtone.2, a.midtone.2)
+        }
         starShadow0 = s.shadow.0; starShadow1 = s.shadow.1; starShadow2 = s.shadow.2
         starMidtone0 = s.midtone.0; starMidtone1 = s.midtone.1; starMidtone2 = s.midtone.2
+        ghsB = GHS.b; ghsHP = GHS.highlightProtect
+        finishing = p.finishing
     }
 }
 
 /// Dedicated stretch for the sparse star layer. The star layer is mostly zero
 /// (background) with compact star flux, so an image-median autostretch would
 /// over-lift noise. Instead: black point at the median (~0), and a midtone that
-/// maps a high percentile (typical faint-star flux) up to a visible level — so
-/// faint field stars survive separation + denoise.
+/// maps a high percentile of the star flux up to a visible level — so faint
+/// field stars survive separation + denoise.
 public struct StarStretch {
     public var shadow: (Float, Float, Float)
     public var midtone: (Float, Float, Float)
 
     public init(base: FITSImage, refPercentile: Float = 0.995, target: Float = 0.48) {
-        var vals: [Float] = []
-        vals.reserveCapacity(base.width * base.height / 16)
+        var all: [Float] = [], lit: [Float] = []
+        all.reserveCapacity(base.width * base.height / 16)
         var i = 0
-        while i < base.rgba.count {
-            vals.append(base.rgba[i] * 0.2126 + base.rgba[i + 1] * 0.7152 + base.rgba[i + 2] * 0.0722)
+        while i + 2 < base.rgba.count {
+            let l = base.rgba[i] * 0.2126 + base.rgba[i + 1] * 0.7152 + base.rgba[i + 2] * 0.0722
+            if l.isFinite {
+                all.append(l)
+                if l > 1e-7 { lit.append(l) }
+            }
             i += 16
         }
-        vals.sort()
-        let s = max(0, vals[vals.count / 2])
-        let ref = vals[min(vals.count - 1, Int(Float(vals.count) * refPercentile))]
-        let x0 = (ref - s) / max(1 - s, 1e-4)
-        let m = x0 * (1 - target) / max(x0 * (1 - 2 * target) + target, 1e-6)
+        all.sort(); lit.sort()
+        // The black point stays at the median of the whole layer (~0).
+        let s = all.isEmpty ? 0 : max(0, all[all.count / 2])
+        // The reference percentile is taken over the pixels that actually
+        // carry star flux. Over the whole layer it only lands on star flux
+        // while stars cover more than 0.5% of the frame: on a sparser layer
+        // (a galaxy field, the feathered classical mask) it fell in the zero
+        // mass, ref = s = 0, the midtone hit its 1e-4 floor and Star Size's
+        // bloom lit every faint feathered mask edge.
+        let ref = lit.isEmpty ? s : lit[min(lit.count - 1, Int(Float(lit.count) * refPercentile))]
+        let m: Float
+        if ref > s {
+            let x0 = (ref - s) / max(1 - s, 1e-4)
+            m = x0 * (1 - target) / max(x0 * (1 - 2 * target) + target, 1e-6)
+        } else {
+            // No star flux above the black point: nothing to measure, so no
+            // lift at all — MTF midtone 0.5 is the identity.
+            m = 0.5
+        }
         let clamped = min(max(m, 1e-4), 0.5)
         shadow = (s, s, s)
         midtone = (clamped, clamped, clamped)
@@ -82,7 +129,11 @@ public struct StarStretch {
 }
 
 /// Blit params — field order MUST match `BlitUniforms` in the shader source.
-struct BlitUniforms { var divider: Float; var compare: Float; var clipping: Float }
+struct BlitUniforms {
+    var divider: Float; var compare: Float; var clipping: Float
+    /// Dither amplitude in display units (one LSB of the drawable); 0 = off.
+    var ditherLSB: Float
+}
 
 /// Per-channel auto base stretch (black point + MTF midtone) from image
 /// statistics, mirroring Siril's autostretch: shadow = median − 2.8·σ (via MAD),
@@ -95,14 +146,17 @@ public struct AutoStretch {
     /// *measured*, not assumed: the midtone is adaptive (see below), so on a
     /// high-dynamic-range target the sky deliberately lands darker than
     /// `targetBG`. Everything downstream anchors on this value.
-    public var displaySky: Float = 0.15
+    public var displaySky: Float = 0.12
 
     /// `targetBG` is where the sky lands after this base stretch, chosen so the
     /// FINISHED sky obeys the published conventions. Two sources agree on the
     /// finished level: Lodriguss's RGB 35-35-35 guideline (≈ 0.08–0.14) and the
     /// duo-band survey's "neutral near-black grey, ~5–12% luminance". The
-    /// default look's Background trim removes ~21% of the sky, so a base of
-    /// 0.15 lands the finished sky at ≈ 0.12 — inside both ranges. (Siril's
+    /// default look's Background (60) only fades in the gradient correction —
+    /// its sky trim starts above 60 — so the base IS the finished sky, and
+    /// 0.12 lands it inside both ranges. (It was 0.15, derived for an older
+    /// default of Background 72, whose ~21% trim brought 0.15 down to 0.12;
+    /// when the default moved to 60 the sky was left at 0.15.) (Siril's
     /// and PixInsight's 0.25 is a *screen* convention for inspecting linear
     /// data, far too bright for a finished image: a core at 29× sky would
     /// arrive at 0.91 before a single slider moved.)
@@ -129,7 +183,7 @@ public struct AutoStretch {
     ///   every strong colour ends up pinned there — the image flattens into a
     ///   slab and the Saturation slider stops doing anything, because chroma is
     ///   dictated by the boundary rather than by the setting.
-    public init(base: FITSImage, extended: FITSImage? = nil, targetBG: Float = 0.15,
+    public init(base: FITSImage, extended: FITSImage? = nil, targetBG: Float = 0.12,
                 highlightCap: Float = 0.72, minSky: Float = 0.065) {
         func samples(_ image: FITSImage, channel: Int) -> [Float] {
             var vals: [Float] = []
@@ -217,10 +271,10 @@ public struct AutoStretch {
         // `minSky` chasing it. On an ordinary frame the highlight constraint is
         // slack and this reduces to the classic autostretch.
         //
-        // `minSky` is 0.065 so that after the Background slider's maximum
-        // black-point trim (which removes up to ~21% of the sky at the default
-        // look) the finished sky still lands inside the documented 0.05-0.09
-        // convention. It was 0.03 — which contradicted that convention and
+        // `minSky` is 0.065 so that a floor-limited frame's finished sky at
+        // the default look (Background 60, no sky trim) lands inside the
+        // documented 0.05-0.09 convention; raising Background above 60 is the
+        // user deliberately darkening it further. It was 0.03 — which contradicted that convention and
         // held whole high-dynamic-range frames dark (the independent 244-sub
         // M 42 landed its sky at 0.028). Squeezing the sky is not this stage's
         // job: highlight protection belongs to the GHS highlight-protect
@@ -336,6 +390,9 @@ public final class ChainRenderer: @unchecked Sendable {
     let blitPipeline: MTLRenderPipelineState
 
     public static let drawablePixelFormat: MTLPixelFormat = .bgra8Unorm
+    /// One quantisation step of `drawablePixelFormat` (8-bit) — the preview's
+    /// dither amplitude. The 16-bit export is never dithered.
+    static let previewDitherLSB: Float = 1.0 / 255.0
 
     public enum Err: Error { case msg(String) }
 
@@ -357,25 +414,43 @@ public final class ChainRenderer: @unchecked Sendable {
         self.blitPipeline = try device.makeRenderPipelineState(descriptor: rpd)
     }
 
+    /// Where one evaluation of the chain writes: the developed image, its
+    /// star-free twin (r = luminance, g = the nebula's share of the light;
+    /// mipmapped — Detail's coarse bands sample it), and the finished output.
+    struct ChainTargets {
+        let neb: MTLTexture
+        let starfree: MTLTexture
+        let out: MTLTexture
+    }
+
     /// Four baked layers uploaded to `MTLTexture`s and kept resident, plus the
-    /// intermediate/output textures and the cached auto stretch.
+    /// live view's intermediate/output textures and the cached auto stretch.
     public final class LayerBundle: @unchecked Sendable {
         let master, corrected, denoised, starless, stars: MTLTexture
-        let nebTex, outTex, beforeTex: MTLTexture
+        /// Owned by the live view ONLY. Off-screen renders (export, thumbnail,
+        /// AI input) allocate their own targets: the 120 Hz loop rewrites these
+        /// every frame, so an export reading them back could contain a frame
+        /// drawn for a different look.
+        let live: ChainTargets
+        let beforeTex: MTLTexture
         public let width: Int, height: Int
         let auto: AutoStretch
+        /// Measured on the master end of the Background blend (nil when there
+        /// is no separate corrected layer). See `EngineParamsGPU`.
+        let autoMaster: AutoStretch?
         /// Master-derived stretch for the truthful "before" view only.
         let autoBefore: AutoStretch
         let star: StarStretch
         init(master: MTLTexture, corrected: MTLTexture, denoised: MTLTexture, starless: MTLTexture,
-             stars: MTLTexture, nebTex: MTLTexture, outTex: MTLTexture,
+             stars: MTLTexture, live: ChainTargets,
              beforeTex: MTLTexture, width: Int, height: Int,
-             auto: AutoStretch, autoBefore: AutoStretch, star: StarStretch) {
+             auto: AutoStretch, autoMaster: AutoStretch?, autoBefore: AutoStretch,
+             star: StarStretch) {
             self.master = master; self.corrected = corrected; self.denoised = denoised
             self.starless = starless; self.stars = stars
-            self.nebTex = nebTex; self.outTex = outTex; self.beforeTex = beforeTex
+            self.live = live; self.beforeTex = beforeTex
             self.width = width; self.height = height; self.auto = auto
-            self.autoBefore = autoBefore; self.star = star
+            self.autoMaster = autoMaster; self.autoBefore = autoBefore; self.star = star
         }
     }
 
@@ -391,11 +466,21 @@ public final class ChainRenderer: @unchecked Sendable {
         return t
     }
 
-    private func scratch(_ w: Int, _ h: Int, mipmapped: Bool = false) -> MTLTexture {
+    private func scratch(_ w: Int, _ h: Int, mipmapped: Bool = false,
+                         format: MTLPixelFormat = .rgba32Float) -> MTLTexture {
         let d = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .rgba32Float, width: w, height: h, mipmapped: mipmapped)
+            pixelFormat: format, width: w, height: h, mipmapped: mipmapped)
         d.usage = [.shaderRead, .shaderWrite]
         return device.makeTexture(descriptor: d)!
+    }
+
+    /// A fresh set of chain targets. The live view's output is mipmapped so
+    /// the fit-to-window preview downsamples faithfully; an off-screen
+    /// render reads mip 0 only.
+    func makeTargets(_ w: Int, _ h: Int, mipmappedOut: Bool) -> ChainTargets {
+        ChainTargets(neb: scratch(w, h),
+                     starfree: scratch(w, h, mipmapped: true, format: .rg32Float),
+                     out: scratch(w, h, mipmapped: mipmappedOut))
     }
 
     public func makeBundle(master originalMaster: FITSImage, corrected originalCorrected: FITSImage? = nil,
@@ -420,20 +505,49 @@ public final class ChainRenderer: @unchecked Sendable {
         // channels, BGE re-pedestals them) and crushed whole channels to zero.
         // The raw master keeps its own stretch for the truthful "before" view.
         let auto = AutoStretch(base: corrected, extended: starless)
+        // Below Background 60 the chain renders toward the raw master, so the
+        // master end needs its own stretch, measured exactly as `auto` is: on
+        // the layer rendered there (the master) with the highlight guard on
+        // its star-free version (master + the baked starless delta — the same
+        // expression the shader evaluates at correctionBlend 0).
+        let autoMaster: AutoStretch? = originalCorrected == nil ? nil
+            : Self.starfreeMaster(master: master, corrected: corrected, starless: starless)
+                .map { AutoStretch(base: master, extended: $0) }
         let autoBefore = AutoStretch(base: master)
         let star = StarStretch(base: stars)
         let masterTex = upload(master)
-        // outTex/beforeTex are mipmapped so the fit-to-window preview downsamples
-        // faithfully (faint stars survive); the compute writes mip 0.
+        // beforeTex (and the live output) are mipmapped so the fit-to-window
+        // preview downsamples faithfully (faint stars survive); the compute
+        // writes mip 0.
         let bundle = LayerBundle(
             master: masterTex, corrected: upload(corrected),
             denoised: upload(denoised),
             starless: upload(starless), stars: upload(stars),
-            nebTex: scratch(w, h, mipmapped: true), outTex: scratch(w, h, mipmapped: true),
+            live: makeTargets(w, h, mipmappedOut: true),
             beforeTex: scratch(w, h, mipmapped: true),
-            width: w, height: h, auto: auto, autoBefore: autoBefore, star: star)
+            width: w, height: h, auto: auto, autoMaster: autoMaster,
+            autoBefore: autoBefore, star: star)
         renderBefore(bundle)
         return bundle
+    }
+
+    /// `max(master + (starless − corrected), 0)` — the starless layer carried
+    /// onto the master, as `processNebula` builds it at correctionBlend 0.
+    /// nil if the layers disagree in size (nothing sensible to measure).
+    static func starfreeMaster(master: FITSImage, corrected: FITSImage,
+                               starless: FITSImage) -> FITSImage? {
+        guard master.rgba.count == corrected.rgba.count,
+              master.rgba.count == starless.rgba.count else { return nil }
+        var out = master.rgba
+        var i = 0
+        while i + 3 < out.count {
+            for c in 0..<3 {
+                out[i + c] = max(master.rgba[i + c] + (starless.rgba[i + c] - corrected.rgba[i + c]), 0)
+            }
+            i += 4
+        }
+        return FITSImage(width: master.width, height: master.height,
+                         channels: master.channels, rgba: out)
     }
 
     /// Render the static "before" (raw stack, auto-stretched) once.
@@ -454,30 +568,33 @@ public final class ChainRenderer: @unchecked Sendable {
         cmd.commit(); cmd.waitUntilCompleted()
     }
 
-    /// Encode the two compute passes into `cmd`, leaving the result in `outTex`.
-    private func encodeChain(_ cmd: MTLCommandBuffer, _ params: EngineParams,
-                             _ b: LayerBundle) {
-        var u = EngineParamsGPU(params, auto: b.auto, star: b.star)
+    /// Encode the two compute passes into `cmd`, leaving the result in `t.out`.
+    /// The ONE chain behind the live view and every export (preview == export).
+    func encodeChain(_ cmd: MTLCommandBuffer, _ params: EngineParams,
+                     _ b: LayerBundle, into t: ChainTargets) {
+        var u = EngineParamsGPU(params, auto: b.auto, master: b.autoMaster, star: b.star)
         let tpg = MTLSize(width: 16, height: 16, depth: 1)
         let grid = MTLSize(width: (b.width + 15) / 16, height: (b.height + 15) / 16, depth: 1)
 
         let e1 = cmd.makeComputeCommandEncoder()!
         e1.setComputePipelineState(processPipeline)
-        e1.setTextures([b.master, b.corrected, b.denoised, b.starless, b.nebTex], range: 0..<5)
+        e1.setTextures([b.master, b.corrected, b.denoised, b.starless, t.neb, t.starfree],
+                       range: 0..<6)
         e1.setBytes(&u, length: MemoryLayout<EngineParamsGPU>.stride, index: 0)
         e1.dispatchThreadgroups(grid, threadsPerThreadgroup: tpg)
         e1.endEncoding()
 
-        // Build the nebula's mip chain so `finish` can read coarse (tens-of-pixel)
-        // blur levels for the large-scale structure boost without a huge inline
-        // gather. Apple-Silicon filters rgba32Float, so linear mip sampling is exact.
+        // Build the star-free twin's mip chain so `finish` can read coarse
+        // (tens-of-pixel) blur levels for the large-scale structure boost
+        // without a huge inline gather. Apple-Silicon filters 32-bit float, so
+        // linear mip sampling is exact.
         let mipEnc = cmd.makeBlitCommandEncoder()!
-        mipEnc.generateMipmaps(for: b.nebTex)
+        mipEnc.generateMipmaps(for: t.starfree)
         mipEnc.endEncoding()
 
         let e2 = cmd.makeComputeCommandEncoder()!
         e2.setComputePipelineState(finishPipeline)
-        e2.setTextures([b.nebTex, b.stars, b.outTex], range: 0..<3)
+        e2.setTextures([t.neb, b.stars, t.out, t.starfree], range: 0..<4)
         e2.setBytes(&u, length: MemoryLayout<EngineParamsGPU>.stride, index: 0)
         e2.dispatchThreadgroups(grid, threadsPerThreadgroup: tpg)
         e2.endEncoding()
@@ -491,24 +608,55 @@ public final class ChainRenderer: @unchecked Sendable {
         guard let drawable = view.currentDrawable,
               let rpd = view.currentRenderPassDescriptor else { return }
         let cmd = queue.makeCommandBuffer()!
-        encodeChain(cmd, params, bundle)
+        encodePreview(cmd, bundle: bundle, params: params, compare: compare,
+                      divider: divider, clipping: clipping, pass: rpd)
+        cmd.present(drawable)
+        cmd.commit()
+    }
+
+    /// The live frame: the chain into the bundle's live targets, then the
+    /// display blit (the only place the preview differs from the export: it
+    /// is resampled to the window and dithered to the 8-bit drawable).
+    func encodePreview(_ cmd: MTLCommandBuffer, bundle: LayerBundle, params: EngineParams,
+                       compare: Bool, divider: Float, clipping: Bool,
+                       pass rpd: MTLRenderPassDescriptor) {
+        encodeChain(cmd, params, bundle, into: bundle.live)
         // Rebuild mips so the trilinear blit downsamples faithfully to the window.
-        if bundle.outTex.mipmapLevelCount > 1 {
+        if bundle.live.out.mipmapLevelCount > 1 {
             let blit = cmd.makeBlitCommandEncoder()!
-            blit.generateMipmaps(for: bundle.outTex)
+            blit.generateMipmaps(for: bundle.live.out)
             blit.endEncoding()
         }
+        encodeDisplayBlit(cmd, source: bundle.live.out, before: bundle.beforeTex,
+                          compare: compare, divider: divider, clipping: clipping,
+                          ditherLSB: Self.previewDitherLSB, pass: rpd)
+    }
+
+    func encodeDisplayBlit(_ cmd: MTLCommandBuffer, source: MTLTexture, before: MTLTexture,
+                           compare: Bool, divider: Float, clipping: Bool, ditherLSB: Float,
+                           pass rpd: MTLRenderPassDescriptor) {
         var bu = BlitUniforms(divider: divider, compare: compare ? 1 : 0,
-                              clipping: clipping ? 1 : 0)
+                              clipping: clipping ? 1 : 0, ditherLSB: ditherLSB)
         let enc = cmd.makeRenderCommandEncoder(descriptor: rpd)!
         enc.setRenderPipelineState(blitPipeline)
-        enc.setFragmentTexture(bundle.outTex, index: 0)
-        enc.setFragmentTexture(bundle.beforeTex, index: 1)
+        enc.setFragmentTexture(source, index: 0)
+        enc.setFragmentTexture(before, index: 1)
         enc.setFragmentBytes(&bu, length: MemoryLayout<BlitUniforms>.stride, index: 0)
         enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         enc.endEncoding()
-        cmd.present(drawable)
-        cmd.commit()
+    }
+
+    /// Run the chain into targets of its own and wait. Every off-screen render
+    /// goes through here, never through the live view's textures — the 120 Hz
+    /// loop would otherwise overwrite the result between completion and
+    /// read-back, mixing in a frame from a different look.
+    private func renderOffscreen(bundle: LayerBundle, params: EngineParams) throws -> MTLTexture {
+        let targets = makeTargets(bundle.width, bundle.height, mipmappedOut: false)
+        let cmd = queue.makeCommandBuffer()!
+        encodeChain(cmd, params, bundle, into: targets)
+        cmd.commit(); cmd.waitUntilCompleted()
+        if let err = cmd.error { throw Err.msg("GPU: \(err)") }
+        return targets.out
     }
 
     /// Render the finished look at reduced size for a library thumbnail. Reuses
@@ -516,11 +664,8 @@ public final class ChainRenderer: @unchecked Sendable {
     /// CPU to an 8-bit sRGB `CGImage` — plenty for a grid cell.
     public func renderThumbnail(bundle: LayerBundle, params: EngineParams,
                                 maxDimension: Int) throws -> CGImage {
-        let cmd = queue.makeCommandBuffer()!
-        encodeChain(cmd, params, bundle)
-        cmd.commit(); cmd.waitUntilCompleted()
-        if let err = cmd.error { throw Err.msg("GPU: \(err)") }
-        return try downscaled(bundle.outTex, maxDimension: maxDimension)
+        try downscaled(try renderOffscreen(bundle: bundle, params: params),
+                       maxDimension: maxDimension)
     }
 
     /// 8-bit sRGB CGImage from a float image — the display path for AI results
@@ -577,27 +722,26 @@ public final class ChainRenderer: @unchecked Sendable {
 
     /// Headless export: run the chain and write a PNG (the CLI path).
     public func renderPNG(bundle: LayerBundle, params: EngineParams, scale: Int = 1, to url: URL) throws {
-        let cmd = queue.makeCommandBuffer()!
-        encodeChain(cmd, params, bundle)
-        cmd.commit(); cmd.waitUntilCompleted()
-        if let err = cmd.error { throw Err.msg("GPU: \(err)") }
-        try writePNG(bundle.outTex, scale: min(max(scale, 1), 2), to: url)
+        let out = try renderOffscreen(bundle: bundle, params: params)
+        try writePNG(out, scale: min(max(scale, 1), 2), to: url)
     }
 
     /// Render the display-referred floating-point result for an additional
     /// export-only processor such as AI super-resolution.
     public func renderImage(bundle: LayerBundle, params: EngineParams) throws -> FITSImage {
-        let cmd = queue.makeCommandBuffer()!
-        encodeChain(cmd, params, bundle)
-        cmd.commit(); cmd.waitUntilCompleted()
-        if let err = cmd.error { throw Err.msg("GPU: \(err)") }
-        let (w, h) = (bundle.outTex.width, bundle.outTex.height)
+        let out = try renderOffscreen(bundle: bundle, params: params)
+        return FITSImage(width: out.width, height: out.height, channels: 3, rgba: Self.readBack(out))
+    }
+
+    /// Mip 0 of an RGBA32F texture as interleaved floats.
+    static func readBack(_ tex: MTLTexture) -> [Float] {
+        let (w, h) = (tex.width, tex.height)
         var floats = [Float](repeating: 0, count: w * h * 4)
         floats.withUnsafeMutableBytes { raw in
-            bundle.outTex.getBytes(raw.baseAddress!, bytesPerRow: w * 16,
-                                   from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
+            tex.getBytes(raw.baseAddress!, bytesPerRow: w * 16,
+                         from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
         }
-        return FITSImage(width: w, height: h, channels: 3, rgba: floats)
+        return floats
     }
 
     public func writePNG(_ image: FITSImage, to url: URL) throws {

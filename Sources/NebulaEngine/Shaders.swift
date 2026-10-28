@@ -7,9 +7,10 @@
 ///
 /// Two passes over textures:
 ///   1. `processNebula` — denoise blend, black point, GHS-family stretch,
-///      midtone saturation → the finished starless nebula.
-///   2. `finish` — local contrast (unsharp) on the nebula, then screen the
-///      stretched star layer back in.
+///      colour → the developed image, plus the luminance of its star-free twin
+///      (the same development with the star flux left out).
+///   2. `finish` — bilateral denoise, then local contrast measured on the
+///      star-free twin, then screen the stretched star layer back in.
 ///
 /// The `Uniforms` layout must match `EngineParamsGPU` on the Swift side.
 let shaderSource = """
@@ -18,7 +19,17 @@ using namespace metal;
 
 // ---- fullscreen blit: draw the rgba32Float result into the drawable ---------
 struct BlitOut { float4 pos [[position]]; float2 uv; };
-struct BlitUniforms { float divider; float compare; float clipping; };
+struct BlitUniforms { float divider; float compare; float clipping; float ditherLSB; };
+
+// PCG hash (Jarzynski & Olano, "Hash Functions for GPU Rendering", JCGT 2020).
+static inline uint pcgHash(uint v) {
+    uint state = v * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+static inline float ditherChannel(float v, float tpdf, float lsb) {
+    return (v <= 0.0 || v >= 1.0) ? v : clamp(v + tpdf * lsb, 0.0, 1.0);
+}
 
 vertex BlitOut blitVertex(uint vid [[vertex_id]]) {
     // Single oversized triangle covering the viewport.
@@ -48,6 +59,25 @@ fragment float4 blitFragment(BlitOut in [[stage_in]],
         float low = min(col.r, min(col.g, col.b));
         if (peak >= 0.995) col = mix(col, float3(1.0, 0.12, 0.08), 0.82);
         else if (low <= 0.002) col = mix(col, float3(0.08, 0.38, 1.0), 0.72);
+    }
+    // Preview-only dither. The drawable is 8-bit, so a smooth sky gradient
+    // quantises into visible bands that the 16-bit export never shows (design
+    // §5 asks for dither). Triangular-PDF noise of 2 LSB peak-to-peak is the
+    // textbook choice (Lipshitz, Wannamaker & Vanderkooy, "Quantization and
+    // Dither: A Theoretical Survey", JAES 1992): it makes the mean AND the
+    // power of the quantisation error independent of the signal, so the
+    // preview keeps the export's tone exactly on average and loses only the
+    // contouring. The pattern is keyed to the pixel, so it is static (no
+    // shimmer at 120 Hz). Exact 0 and 1 are left alone so black, white and
+    // the clipping overlay stay pure. The export never passes through here.
+    if (b.ditherLSB > 0.0) {
+        uint2 p = uint2(in.pos.xy);
+        uint h1 = pcgHash(p.x + pcgHash(p.y));
+        uint h2 = pcgHash(h1);
+        float tpdf = (float(h1 >> 8) + float(h2 >> 8)) * (1.0 / 16777216.0) - 1.0;  // (-1, 1)
+        col = float3(ditherChannel(col.r, tpdf, b.ditherLSB),
+                     ditherChannel(col.g, tpdf, b.ditherLSB),
+                     ditherChannel(col.b, tpdf, b.ditherLSB));
     }
     return float4(col, 1.0);
 }
@@ -82,6 +112,13 @@ struct Uniforms {
     // star flux) so faint field stars survive separation + denoise.
     float starShadow0; float starShadow1; float starShadow2;
     float starMidtone0; float starMidtone1; float starMidtone2;
+    // GHS shape constants, injected from `GHS.b` / `GHS.highlightProtect` on
+    // the Swift side so the CPU mirror and this shader cannot drift apart.
+    float ghsB;
+    float ghsHP;
+    // Strength (0…1) of the cosmetic finishing stages — the neutral-tint SCNR
+    // floor and star-core whitening. See `EngineParams.finishing`.
+    float finishing;
 };
 
 // asinh glow stretch: lifts faint signal, D = strength (0 => identity).
@@ -151,23 +188,144 @@ static inline float3 withLuminance(float3 c, float oldLum, float newLum) {
 // channel alone shifts the hue; scaling all three down dims the subject just
 // where it should be brightest. Desaturating to the gamut boundary is what
 // keeps a bright Ha core reading as a bright core rather than a flat red slab.
-// In range this is the identity — the stretch owns the highlight shoulder.
+//
+// In range this is the identity — the stretch owns the highlight shoulder
+// (GHS highlight-protect, `GHS.highlightProtect`, and the base stretch's
+// `highlightCap`, documented as the colour-headroom control that keeps strong
+// colours off the gamut boundary so Saturation keeps its authority). This
+// guard is an overflow guard only (HANDOFF, "Output quality overhaul").
+//
+// It used to roll the peak off from a 0.85 knee, which broke that contract:
+// a peak of exactly 1.0 came out at 0.945, so white star cores rendered
+// 241/255 and the whole 0.85–1 range was squashed (slope down to 0.37). There
+// is no in-range shoulder that can be put back: a map that is the identity on
+// [0,1], stays in gamut and never makes a brighter input darker must send
+// every over-range peak to exactly 1. Tonal separation between over-range
+// pixels is carried by their held luminance instead: a brighter one lands
+// whiter, and anything at or above white luminance is white.
 static inline float3 protectHighlights(float3 c) {
     c = max(c, 0.0);
     float peak = max(c.r, max(c.g, c.b));
-    const float knee = 0.85;
-    if (peak <= knee) return c;
-    // Roll the peak channel off smoothly toward 1 instead of stopping dead at
-    // it. A hard boundary pins every over-range pixel to exactly the same
-    // value, so a bright nebula body flattens into one slab and the Saturation
-    // slider stops mattering — chroma is then set by the boundary, not by the
-    // setting. The exponential shoulder is asymptotic, so star cores still
-    // reach white while the body keeps its tonal separation.
-    float mapped = knee + (1.0 - knee) * (1.0 - exp(-(peak - knee) / (1.0 - knee)));
+    if (peak <= 1.0) return c;                       // in gamut: identity
     float L = luminance(c);
-    if (L >= mapped) return float3(clamp(mapped, 0.0, 1.0));
-    float t = (mapped - L) / max(peak - L, 1e-6);
-    return clamp(L + (c - L) * t, 0.0, 1.0);
+    if (L >= 1.0) return float3(1.0);                // brighter than white
+    float t = (1.0 - L) / (peak - L);                // peak > 1 > L ⇒ 0 < t < 1
+    return clamp(L + (c - L) * t, 0.0, 1.0);         // peak → 1, luminance held
+}
+
+// The per-pixel development — base stretch, Background, GHS, colour — of a
+// linear pixel. Shared verbatim by the image and its star-free twin, so the
+// two differ ONLY by the star flux (bit-identical wherever there is none).
+static inline float3 develop(float3 neb, float starness, constant Uniforms& u) {
+    // Auto base stretch: a per-channel black point (this is what neutralises
+    // the sky), then ONE midtone applied to luminance and carried back
+    // colour-preserving. Stretching the channels independently compresses the
+    // strongest one hardest and flattens — even inverts — real colour; every
+    // reference tool scales RGB by a single luminance-derived factor instead.
+    float3 shadow = float3(u.shadow0, u.shadow1, u.shadow2);
+    neb = max((neb - shadow) / max(1.0 - shadow, 1e-4), 0.0);
+    float baseLum = luminance(neb);
+    neb = withLuminance(neb, baseLum, mtfPivot(baseLum, u.midtone0));
+
+    // Background: subtract a FRACTION of this image's own sky level, so the
+    // slider means the same thing whether the base stretch left the sky at
+    // 0.12 or, on a high-dynamic-range target, far darker.
+    float sky = clamp(u.autoSky, 0.0, 0.6);
+    float bp = clamp(u.blackPoint, 0.0, 0.95) * sky;
+    float lum = luminance(neb);
+    float bgLum = max(lum - bp, 0.0) / max(1.0 - bp, 1e-3);
+    neb = withLuminance(neb, lum, bgLum);
+    // Where the sky now sits — the anchor for the tone curve and colour gates.
+    float f = clamp((sky - bp) / max(1.0 - bp, 1e-3), 0.0, 0.5);
+
+    // Published GHS on the above-sky signal, linked on luminance and applied
+    // colour-preserving. Glow = strength (D), Contrast = symmetry point (where
+    // the stretch concentrates: low = lift everything faint, high = punchy
+    // midtones over dark sky). The sky floor itself never moves.
+    lum = luminance(neb);
+    float shaped = lum;
+    if (lum > f) {
+        float t = (lum - f) / max(1.0 - f, 1e-4);
+        // b and HP arrive from `GHS.b` / `GHS.highlightProtect` (one source).
+        shaped = f + (1.0 - f) * ghsStretch(t, u.glowD, u.ghsB, u.contrastSP, u.ghsHP);
+    }
+    float preContrast = shaped;
+    neb = withLuminance(neb, lum, shaped);
+
+    // Colour is four independent controls (Saturation, Vibrance, Tint, Warmth),
+    // all weighted against the sky floor so the background stays neutral — no
+    // colour is lifted out of noise. The weight uses the PRE-stretch tone as
+    // well, so a curve that darkens the nebula body can't drain its colour
+    // exactly when the user asks for punch.
+    // Colour only above the noise floor. The base stretch is colour-preserving
+    // now, which also preserves the *chroma noise* the old per-channel stretch
+    // used to flatten, so the gate has to start at the sky rather than below it
+    // or the background fills with colour speckle.
+    lum = luminance(neb);
+    float w = smoothstep(f, f + 0.18, max(lum, preContrast));
+
+    // Saturation: a uniform chroma scale toward/away from grey.
+    float satF = mix(1.0, u.saturation, w);
+    neb = max(lum + (neb - lum) * satF, 0.0);
+
+    // Vibrance: a chroma-protected boost applied on top. Already-colourful pixels
+    // take less of it, so pale nebulosity enriches without pushing saturated
+    // cores into clipped neon; below 1 it gently drains the most saturated first.
+    lum = luminance(neb);
+    float vibF = mix(1.0, u.vibrance, w);
+    {
+        float mx = max(neb.r, max(neb.g, neb.b));
+        float mn = min(neb.r, min(neb.g, neb.b));
+        float chroma = (mx - mn) / max(mx, 1e-4);
+        float protect = 1.0 - 0.75 * smoothstep(0.45, 0.95, chroma);
+        vibF = 1.0 + (vibF - 1.0) * protect;
+    }
+    lum = luminance(neb);
+    neb = max(lum + (neb - lum) * vibF, 0.0);
+
+    // Saturated Bayer star cores carry unreliable hue: fade bright,
+    // star-dominated pixels toward white (the reference look — white cores,
+    // coloured halos). The starness gate keeps bright nebulosity untouched.
+    // A cosmetic finishing stage, so it is gated off in the truthful look.
+    float corePeak = max(neb.r, max(neb.g, neb.b));
+    float coreW = smoothstep(0.75, 0.92, corePeak) * smoothstep(0.35, 0.75, starness)
+                * clamp(u.finishing, 0.0, 1.0);
+    neb = mix(neb, float3(corePeak), 0.85 * coreW);
+
+    // Tint: green↔magenta balance. Neutral (0.5) keeps only a light finishing
+    // SCNR (the reference-tool convention — calibrated data shouldn't need
+    // more), using Siril's average-neutral estimator with lightness preserved
+    // so real teals/OIII shift hue slightly rather than darken. Toward magenta
+    // the suppression strengthens to a full SCNR; toward green it releases and
+    // then adds green. The neutral-tint floor is a finishing stage (gated off
+    // in the truthful look); with `finishing` = 1 this is exactly
+    // 0.25 − 0.75·tg, and full magenta is a full SCNR either way.
+    float tg = (u.tint - 0.5) * 2.0;                    // -1 magenta .. +1 green
+    float scnrFloor = 0.25 * clamp(u.finishing, 0.0, 1.0);
+    float scnr = clamp(scnrFloor - tg * (1.0 - scnrFloor), 0.0, 1.0);
+    if (scnr > 0.0) {
+        float preL = luminance(neb);
+        float m = 0.5 * (neb.r + neb.b);                // average neutral
+        neb.g = mix(neb.g, min(neb.g, m), scnr);
+        neb = withLuminance(neb, luminance(neb), preL); // preserve lightness
+    }
+    if (tg > 0.0) neb.g = neb.g * (1.0 + tg * 0.35);
+
+    // Warmth: the second white-balance axis (blue↔amber). Warm lifts red and
+    // trims blue; cool the reverse. A trim, not a wash — the calibrated colour
+    // should already be close.
+    float wm = (u.warmth - 0.5) * 2.0;                  // -1 cool .. +1 warm
+    neb.r = max(neb.r * (1.0 + wm * 0.15), 0.0);
+    neb.b = max(neb.b * (1.0 - wm * 0.15), 0.0);
+
+    // Shadow neutralisation: colour at or below the sky floor is noise, so fade
+    // its chroma toward neutral grey. Anchored on the analytic sky floor —
+    // faint nebulosity above the sky keeps its colour.
+    float nlum = luminance(neb);
+    float sw = clamp(((f + 0.05) - nlum) / 0.10, 0.0, 1.0) * clamp(u.shadowNeutralize, 0.0, 1.0);
+    neb = mix(neb, float3(nlum), sw);
+
+    return max(neb, 0.0);
 }
 
 kernel void processNebula(texture2d<float, access::read>  master   [[texture(0)]],
@@ -175,6 +333,7 @@ kernel void processNebula(texture2d<float, access::read>  master   [[texture(0)]
                           texture2d<float, access::read>  denoised [[texture(2)]],
                           texture2d<float, access::read>  starless [[texture(3)]],
                           texture2d<float, access::write> outNeb   [[texture(4)]],
+                          texture2d<float, access::write> outStarfree [[texture(5)]],
                           constant Uniforms&              u        [[buffer(0)]],
                           uint2 gid [[thread_position_in_grid]]) {
     if (gid.x >= outNeb.get_width() || gid.y >= outNeb.get_height()) return;
@@ -256,123 +415,29 @@ kernel void processNebula(texture2d<float, access::read>  master   [[texture(0)]
         float ring = smoothstep(0.02, 0.12, dil) * shrink;
         baseDelta = (slTight - sl) * ring;   // ≤ 0 by construction
     }
-    float3 neb = max(mix(sl, cleanNeb, db) + baseDelta, 0.0)
-               + presenceFlux * clamp(u.starWeight, 0.0, 1.0);
+    float3 base = max(mix(sl, cleanNeb, db) + baseDelta, 0.0);
+    float3 starPart = presenceFlux * clamp(u.starWeight, 0.0, 1.0);
     // How star-dominated this pixel is, judged in linear space before any
     // stretch — used to whiten clipped star cores without touching nebula.
     float starness = luminance(presenceFlux)
                    / max(luminance(sl) + luminance(presenceFlux), 1e-6);
 
-    // Auto base stretch: a per-channel black point (this is what neutralises
-    // the sky), then ONE midtone applied to luminance and carried back
-    // colour-preserving. Stretching the channels independently compresses the
-    // strongest one hardest and flattens — even inverts — real colour; every
-    // reference tool scales RGB by a single luminance-derived factor instead.
-    float3 shadow = float3(u.shadow0, u.shadow1, u.shadow2);
-    neb = max((neb - shadow) / max(1.0 - shadow, 1e-4), 0.0);
-    float baseLum = luminance(neb);
-    neb = withLuminance(neb, baseLum, mtfPivot(baseLum, u.midtone0));
-
-    // Background: subtract a FRACTION of this image's own sky level, so the
-    // slider means the same thing whether the base stretch left the sky at
-    // 0.12 or, on a high-dynamic-range target, far darker.
-    float sky = clamp(u.autoSky, 0.0, 0.6);
-    float bp = clamp(u.blackPoint, 0.0, 0.95) * sky;
-    float lum = luminance(neb);
-    float bgLum = max(lum - bp, 0.0) / max(1.0 - bp, 1e-3);
-    neb = withLuminance(neb, lum, bgLum);
-    // Where the sky now sits — the anchor for the tone curve and colour gates.
-    float f = clamp((sky - bp) / max(1.0 - bp, 1e-3), 0.0, 0.5);
-
-    // Published GHS on the above-sky signal, linked on luminance and applied
-    // colour-preserving. Glow = strength (D), Contrast = symmetry point (where
-    // the stretch concentrates: low = lift everything faint, high = punchy
-    // midtones over dark sky). The sky floor itself never moves.
-    lum = luminance(neb);
-    float shaped = lum;
-    if (lum > f) {
-        float t = (lum - f) / max(1.0 - f, 1e-4);
-        // b and HP mirror `GHS.b` / `GHS.highlightProtect` — keep in lockstep.
-        shaped = f + (1.0 - f) * ghsStretch(t, u.glowD, 8.0, u.contrastSP, 0.20);
-    }
-    float preContrast = shaped;
-    neb = withLuminance(neb, lum, shaped);
-
-    // Colour is four independent controls (Saturation, Vibrance, Tint, Warmth),
-    // all weighted against the sky floor so the background stays neutral — no
-    // colour is lifted out of noise. The weight uses the PRE-stretch tone as
-    // well, so a curve that darkens the nebula body can't drain its colour
-    // exactly when the user asks for punch.
-    // Colour only above the noise floor. The base stretch is colour-preserving
-    // now, which also preserves the *chroma noise* the old per-channel stretch
-    // used to flatten, so the gate has to start at the sky rather than below it
-    // or the background fills with colour speckle.
-    lum = luminance(neb);
-    float w = smoothstep(f, f + 0.18, max(lum, preContrast));
-
-    // Saturation: a uniform chroma scale toward/away from grey.
-    float satF = mix(1.0, u.saturation, w);
-    neb = max(lum + (neb - lum) * satF, 0.0);
-
-    // Vibrance: a chroma-protected boost applied on top. Already-colourful pixels
-    // take less of it, so pale nebulosity enriches without pushing saturated
-    // cores into clipped neon; below 1 it gently drains the most saturated first.
-    lum = luminance(neb);
-    float vibF = mix(1.0, u.vibrance, w);
-    {
-        float mx = max(neb.r, max(neb.g, neb.b));
-        float mn = min(neb.r, min(neb.g, neb.b));
-        float chroma = (mx - mn) / max(mx, 1e-4);
-        float protect = 1.0 - 0.75 * smoothstep(0.45, 0.95, chroma);
-        vibF = 1.0 + (vibF - 1.0) * protect;
-    }
-    lum = luminance(neb);
-    neb = max(lum + (neb - lum) * vibF, 0.0);
-
-    // Saturated Bayer star cores carry unreliable hue: fade bright,
-    // star-dominated pixels toward white (the reference look — white cores,
-    // coloured halos). The starness gate keeps bright nebulosity untouched.
-    float corePeak = max(neb.r, max(neb.g, neb.b));
-    float coreW = smoothstep(0.75, 0.92, corePeak) * smoothstep(0.35, 0.75, starness);
-    neb = mix(neb, float3(corePeak), 0.85 * coreW);
-
-    // Tint: green↔magenta balance. Neutral (0.5) keeps only a light finishing
-    // SCNR (the reference-tool convention — calibrated data shouldn't need
-    // more), using Siril's average-neutral estimator with lightness preserved
-    // so real teals/OIII shift hue slightly rather than darken. Toward magenta
-    // the suppression strengthens to a full SCNR; toward green it releases and
-    // then adds green.
-    float tg = (u.tint - 0.5) * 2.0;                    // -1 magenta .. +1 green
-    float scnr = clamp(0.25 - tg * 0.75, 0.0, 1.0);
-    if (scnr > 0.0) {
-        float preL = luminance(neb);
-        float m = 0.5 * (neb.r + neb.b);                // average neutral
-        neb.g = mix(neb.g, min(neb.g, m), scnr);
-        neb = withLuminance(neb, luminance(neb), preL); // preserve lightness
-    }
-    if (tg > 0.0) neb.g = neb.g * (1.0 + tg * 0.35);
-
-    // Warmth: the second white-balance axis (blue↔amber). Warm lifts red and
-    // trims blue; cool the reverse. A trim, not a wash — the calibrated colour
-    // should already be close.
-    float wm = (u.warmth - 0.5) * 2.0;                  // -1 cool .. +1 warm
-    neb.r = max(neb.r * (1.0 + wm * 0.15), 0.0);
-    neb.b = max(neb.b * (1.0 - wm * 0.15), 0.0);
-
-    // Shadow neutralisation: colour at or below the sky floor is noise, so fade
-    // its chroma toward neutral grey. Anchored on the analytic sky floor —
-    // faint nebulosity above the sky keeps its colour.
-    float nlum = luminance(neb);
-    float sw = clamp(((f + 0.05) - nlum) / 0.10, 0.0, 1.0) * clamp(u.shadowNeutralize, 0.0, 1.0);
-    neb = mix(neb, float3(nlum), sw);
-
-    outNeb.write(float4(max(neb, 0.0), 1.0), gid);
+    outNeb.write(float4(develop(base + starPart, starness, u), 1.0), gid);
+    // The star-free twin: the same development without the star flux. Detail's
+    // local-contrast bands are measured on it (design §5: "unsharp on
+    // starless only"), so a star's own light never drives the boost around it.
+    // Channel g carries how much of this pixel's (displayed) linear light is
+    // nebula — the share of Detail's change the pixel takes (see `finish`).
+    float lb = luminance(base), ls = luminance(starPart);
+    float nebShare = lb / max(lb + ls, 1e-6);
+    outStarfree.write(float4(luminance(develop(base, 0.0, u)), nebShare, 0.0, 1.0), gid);
 }
 
-kernel void finish(texture2d<float, access::sample> nebula [[texture(0)]],
-                   texture2d<float, access::read>  stars  [[texture(1)]],
-                   texture2d<float, access::write> outTex [[texture(2)]],
-                   constant Uniforms&              u      [[buffer(0)]],
+kernel void finish(texture2d<float, access::read>   nebula   [[texture(0)]],
+                   texture2d<float, access::read>   stars    [[texture(1)]],
+                   texture2d<float, access::write>  outTex   [[texture(2)]],
+                   texture2d<float, access::sample> starfree [[texture(3)]],
+                   constant Uniforms&               u        [[buffer(0)]],
                    uint2 gid [[thread_position_in_grid]]) {
     uint W = outTex.get_width(), H = outTex.get_height();
     if (gid.x >= W || gid.y >= H) return;
@@ -380,14 +445,16 @@ kernel void finish(texture2d<float, access::sample> nebula [[texture(0)]],
     float3 neb = nebula.read(gid).rgb;
     float centreLum = luminance(neb);
 
-    // One 9x9 gather feeds two consumers: the box blurs for local contrast and
-    // an edge-preserving bilateral for Denoise. Stars ride in this image
-    // (linear presence), so the smoothing is faded on compact bright peaks
-    // below — star profiles survive full Denoise.
+    // One 9x9 gather feeds three consumers: the box blurs that detect compact
+    // star peaks, an edge-preserving bilateral for Denoise, and the star-free
+    // box blurs for local contrast. Stars ride in this image (linear
+    // presence), so the smoothing is faded on compact bright peaks below —
+    // star profiles survive full Denoise.
     const int R = 4;
     float3 acc = 0.0; float n = 0.0;
     float3 fineAcc = 0.0; float fineN = 0.0;
     float3 bilAcc = 0.0; float bilW = 0.0;
+    float sfAcc = 0.0, sfFineAcc = 0.0;
     // Range tolerance grows with strength: light denoise only merges near-equal
     // pixels; full denoise smooths visible grain but still respects real edges.
     float sigR = 0.015 + 0.10 * clamp(u.smoothStrength, 0.0, 1.0);
@@ -396,8 +463,9 @@ kernel void finish(texture2d<float, access::sample> nebula [[texture(0)]],
             int x = clamp(int(gid.x) + dx, 0, int(W) - 1);
             int y = clamp(int(gid.y) + dy, 0, int(H) - 1);
             float3 nb = nebula.read(uint2(x, y)).rgb;
-            acc += nb; n += 1.0;
-            if (abs(dx) <= 1 && abs(dy) <= 1) { fineAcc += nb; fineN += 1.0; }
+            float sf = starfree.read(uint2(x, y)).r;
+            acc += nb; n += 1.0; sfAcc += sf;
+            if (abs(dx) <= 1 && abs(dy) <= 1) { fineAcc += nb; fineN += 1.0; sfFineAcc += sf; }
             float dl = luminance(nb) - centreLum;
             float wgt = exp(-float(dx*dx + dy*dy) / 12.5)          // spatial σ≈2.5
                       * exp(-(dl*dl) / (2.0 * sigR * sigR));       // range
@@ -414,27 +482,50 @@ kernel void finish(texture2d<float, access::sample> nebula [[texture(0)]],
         neb = mix(neb, bilAcc / max(bilW, 1e-5),
                   clamp(u.smoothStrength, 0.0, 1.0) * starGuard);
     }
-    float lum = luminance(neb), blurLum = luminance(blur), fineLum = luminance(fineBlur);
+    float lum = luminance(neb);
+    // Detail is local contrast of the NEBULA only (design §5 "unsharp on
+    // starless only"; EngineParams: "applied to the starless nebula only so
+    // stars never bloat or halo"). Every band below is measured on the
+    // star-free twin. Measured on the image itself, a star's own light raised
+    // its core and, through the coarse bands, darkened a ring of sky tens of
+    // pixels out — a halo that no slider had asked for.
+    //
+    // `ref` is the star-free centre shifted by this pixel's Denoise change, so
+    // wherever no star is near (twin == image) the arithmetic is exactly what
+    // it was; under a star it is the local contrast of the nebula beneath it.
+    float2 twin = starfree.read(gid).rg;
+    float ref = twin.r + (lum - centreLum);
+    float sfFine = sfFineAcc / fineN, sfBlur = sfAcc / n;
     // Two spatial bands give Detail useful reach without forcing one halo-prone
     // radius. Clamp the recovered signal so noise spikes and ringing cannot run
     // away at the end of the slider.
-    float recovered = 0.65 * (lum - fineLum) + 0.35 * (lum - blurLum);
+    float recovered = 0.65 * (ref - sfFine) + 0.35 * (ref - sfBlur);
     recovered = clamp(recovered, -0.08, 0.08);
     // Large-scale structure "pop": local contrast against coarse mip levels of
-    // the nebula — tens of pixels of blur that the small box gathers can't reach.
-    // Two mip taps give a mid- and large-scale band so structure swells at more
-    // than one size; the wide clamp lets it carry real depth while still bounding
-    // runaway gain. Applied chroma-preserving (via withLuminance) on the starless
-    // nebula only, so it deepens structure without shifting hue or bloating stars.
+    // the star-free nebula — tens of pixels of blur that the small box gathers
+    // can't reach. Two mip taps give a mid- and large-scale band so structure
+    // swells at more than one size; the wide clamp lets it carry real depth
+    // while still bounding runaway gain. Applied chroma-preserving (via
+    // withLuminance), so it deepens structure without shifting hue.
     float2 uv = (float2(gid) + 0.5) / float2(W, H);
     constexpr sampler mip(coord::normalized, address::clamp_to_edge,
                           filter::linear, mip_filter::linear);
-    float midLum   = luminance(nebula.sample(mip, uv, level(3.5)).rgb);
-    float largeLum = luminance(nebula.sample(mip, uv, level(5.5)).rgb);
-    float structure = 0.55 * (lum - midLum) + 0.45 * (lum - largeLum);
+    float midLum   = starfree.sample(mip, uv, level(3.5)).r;
+    float largeLum = starfree.sample(mip, uv, level(5.5)).r;
+    float structure = 0.55 * (ref - midLum) + 0.45 * (ref - largeLum);
     structure = clamp(structure, -0.22, 0.22);
-    float detailedLum = max(lum + recovered * u.detailStrength
-                                 + structure * u.structureStrength, 0.0);
+    // A change measured on the nebula is a display-space change AT THE
+    // NEBULA'S LEVEL. Under a star the pixel sits far up the curve, where the
+    // stretch is much flatter: added at full size it would transplant the
+    // sky's stretched noise (and the separator's fill under the star) onto
+    // the star — a noisy, dimmed core. For a log-like stretch (f′ ∝ 1/x, which
+    // asinh, MTF and GHS approach above the sky) the slope ratio between the
+    // two levels is the nebula's share of the linear light, so the change is
+    // scaled by that share: 1 wherever there is no
+    // star (bit-identical to before), → 0 on a star core (Detail leaves the
+    // captured star profile alone).
+    float detailedLum = max(lum + (recovered * u.detailStrength
+                                   + structure * u.structureStrength) * twin.g, 0.0);
     neb = withLuminance(neb, lum, detailedLum);
 
     // Star Size bloom ONLY: star presence is already in the image linearly.

@@ -4,99 +4,146 @@ import Foundation
 import NebulaAI
 import NebulaEngine
 
-// nebula-ai: native in-process replacement for the GraXpert subprocess.
-//   nebula-ai denoise <in.fits> <out.fits> [--strength S] [--model P]
-//   nebula-ai bg      <in.fits> <out.fits> [--model P]
-//   nebula-ai superres <in.fits> <out.fits> --model P
-// Models default to the GraXpert model cache; override with --model or the
-// NEBULA_DENOISE_MODEL / NEBULA_BGE_MODEL env vars.
+// nebula-ai: native in-process replacement for the GraXpert subprocess — and a
+// drop-in for the bake's own AI stages: same model discovery (ModelLocator),
+// same defaults (denoise strength 1.0, background smoothing 0.5).
 
-func die(_ msg: String) -> Never {
-    FileHandle.standardError.write(Data((msg + "\n").utf8)); exit(1)
+let usage = """
+usage: nebula-ai denoise  <in.fits> <out.fits> [--strength S] [--batch N] [--model PATH]
+       nebula-ai bg       <in.fits> <out.fits> [--smoothing S] [--model PATH]
+       nebula-ai superres <in.fits> <out.fits> --model PATH
+
+  --strength S   denoise blend, 0…1 (default 1.0, as the bake)
+  --smoothing S  background-model smoothing, 0…1 (default 0.5: GraXpert's default, as the bake)
+  --batch N      denoise tiles per model run, 1…32 (default: 4 below 16 GB RAM, else 8;
+                 changes memory/speed only, never pixels)
+  --model PATH   an explicit .onnx. Otherwise NEBULA_DENOISE_MODEL / NEBULA_BGE_MODEL, the
+                 app bundle, ~/Library/Application Support/Nebula/Models, then GraXpert's
+                 cache (newest version) — the same search the app uses. superres uses
+                 --model or NEBULA_SUPERRES_MODEL.
+
+exit status: 0 success, 1 processing failed, 2 bad arguments
+"""
+
+func die(_ msg: String, code: Int32 = 1) -> Never {
+    FileHandle.standardError.write(Data((msg + "\n").utf8)); exit(code)
 }
 
-/// Newest `model.onnx` under a GraXpert `*-ai-models` dir (versions sort desc).
-func discoverModel(base: String, env: String) -> String? {
-    if let e = ProcessInfo.processInfo.environment[env],
-       FileManager.default.fileExists(atPath: e) { return e }
-    let root = (NSString(string: "~/Library/Application Support/GraXpert/\(base)")
-        .expandingTildeInPath)
-    guard let versions = try? FileManager.default.contentsOfDirectory(atPath: root) else { return nil }
-    for v in versions.sorted(by: >) {
-        let cand = "\(root)/\(v)/model.onnx"
-        if FileManager.default.fileExists(atPath: cand) { return cand }
+/// A usage error: message + usage on stderr, exit 2.
+func usageError(_ msg: String) -> Never {
+    die("nebula-ai: \(msg)\n\n\(usage)", code: 2)
+}
+
+struct Options {
+    var command = "", input = "", output = ""
+    var strength: Float = 1.0
+    var smoothing: Float = 0.5
+    var batch: Int?
+    var model: String?
+}
+
+/// Strict parse: every flag must be known for the command, have a value, and
+/// that value must parse and be in range. Nothing silently falls back.
+func parse(_ argv: [String]) -> Options {
+    if argv.contains("-h") || argv.contains("--help") { print(usage); exit(0) }
+    var opts = Options()
+    var positional: [String] = []
+    let allowed: [String: Set<String>] = [
+        "denoise": ["--strength", "--batch", "--model"],
+        "bg": ["--smoothing", "--model"],
+        "superres": ["--model"],
+    ]
+    guard let cmd = argv.first else { usageError("missing command") }
+    guard let flags = allowed[cmd] else { usageError("unknown command '\(cmd)' (expected denoise|bg|superres)") }
+    opts.command = cmd
+
+    func unit(_ flag: String, _ text: String) -> Float {
+        // Float("0,5") is nil and Float("nan") is NaN — both are errors, never 1.0.
+        guard let v = Float(text), v.isFinite, (0...1).contains(v) else {
+            usageError("\(flag) needs a number from 0 to 1 (got '\(text)')")
+        }
+        return v
     }
-    return nil
-}
 
-/// FITSImage (interleaved RGBA) -> row-major HxWxC used by the AI pipelines.
-func toHWC(_ img: FITSImage) -> [Float] {
-    let n = img.width * img.height, c = img.channels
-    var out = [Float](repeating: 0, count: n * c)
-    for p in 0..<n { for ch in 0..<c { out[p * c + ch] = img.rgba[p * 4 + ch] } }
-    return out
-}
-
-/// HxWxC -> a FITSImage (broadcast mono to R=G=B, alpha=1) ready to write.
-func fromHWC(_ hwc: [Float], width: Int, height: Int, channels: Int) -> FITSImage {
-    let n = width * height
-    var rgba = [Float](repeating: 1, count: n * 4)
-    for p in 0..<n {
-        if channels == 1 {
-            let v = hwc[p]; rgba[p*4] = v; rgba[p*4+1] = v; rgba[p*4+2] = v
+    var i = 1
+    while i < argv.count {
+        let a = argv[i]
+        if a.hasPrefix("--") {
+            guard flags.contains(a) else { usageError("'\(a)' is not an option of '\(cmd)'") }
+            guard i + 1 < argv.count else { usageError("\(a) needs a value") }
+            let v = argv[i + 1]
+            switch a {
+            case "--strength": opts.strength = unit(a, v)
+            case "--smoothing": opts.smoothing = unit(a, v)
+            case "--batch":
+                guard let n = Int(v), (1...32).contains(n) else {
+                    usageError("--batch needs a whole number from 1 to 32 (got '\(v)')")
+                }
+                opts.batch = n
+            case "--model":
+                guard FileManager.default.fileExists(atPath: v) else { usageError("--model: no file at '\(v)'") }
+                opts.model = v
+            default: usageError("unhandled option '\(a)'")
+            }
+            i += 2
         } else {
-            for ch in 0..<3 { rgba[p*4+ch] = hwc[p*channels+ch] }
+            positional.append(a); i += 1
         }
     }
-    return FITSImage(width: width, height: height, channels: channels, rgba: rgba)
+    guard positional.count == 2 else {
+        usageError(positional.count < 2 ? "expected <in.fits> <out.fits>"
+                                        : "unexpected argument '\(positional[2])'")
+    }
+    opts.input = positional[0]; opts.output = positional[1]
+    return opts
 }
 
-func optValue(_ args: [String], _ flag: String) -> String? {
-    guard let i = args.firstIndex(of: flag), i + 1 < args.count else { return nil }
-    return args[i + 1]
-}
+let opts = parse(Array(CommandLine.arguments.dropFirst()))
 
-let args = CommandLine.arguments
-guard args.count >= 4 else {
-    die("usage: nebula-ai <denoise|bg|superres> <in.fits> <out.fits> [--strength S] [--model P]")
+/// `--model` wins (its version, if any, read from a GraXpert-layout path);
+/// otherwise the app's own search order.
+func resolve(_ kind: AIModel) -> LocatedModel {
+    if let path = opts.model {
+        return LocatedModel(explicitPath: path)
+    }
+    guard let found = ModelLocator.locate(kind) else {
+        die("nebula-ai: \(kind.rawValue) model not found (pass --model, set \(kind.environmentVariable), "
+            + "or install GraXpert once so its model cache exists)")
+    }
+    return found
 }
-let cmd = args[1], inPath = args[2], outPath = args[3]
 
 do {
-    let img = try FITSImage.read(URL(fileURLWithPath: inPath))
-    let hwc = toHWC(img)
+    let img = try FITSImage.read(URL(fileURLWithPath: opts.input))
+    let hwc = img.hwcPixels()
     let result: [Float]
     var outputWidth = img.width, outputHeight = img.height
 
-    switch cmd {
+    switch opts.command {
     case "denoise":
-        guard let model = optValue(args, "--model")
-            ?? discoverModel(base: "denoise-ai-models", env: "NEBULA_DENOISE_MODEL")
-        else { die("denoise model not found (set --model or NEBULA_DENOISE_MODEL)") }
-        let strength = Float(optValue(args, "--strength") ?? "1.0") ?? 1.0
-        result = try Denoiser(modelPath: model)
-            .denoise(pixels: hwc, h: img.height, w: img.width, c: img.channels, strength: strength)
+        let model = resolve(.denoise)
+        let dn = try Denoiser(model: model, batchSize: opts.batch)
+        FileHandle.standardError.write(Data(("denoise model \(model.path) (version \(model.version?.description ?? "unknown"), "
+            + "threshold \(dn.modelThreshold), batch \(dn.batchSize))\n").utf8))
+        result = try dn.denoise(pixels: hwc, h: img.height, w: img.width, c: img.channels,
+                                strength: opts.strength)
     case "bg":
-        guard let model = optValue(args, "--model")
-            ?? discoverModel(base: "bge-ai-models", env: "NEBULA_BGE_MODEL")
-        else { die("bge model not found (set --model or NEBULA_BGE_MODEL)") }
-        result = try BgExtractor(modelPath: model)
-            .extract(pixels: hwc, h: img.height, w: img.width, c: img.channels, smoothing: 0)
-    case "superres":
-        guard img.channels == 3 else { die("superres requires an RGB FITS image") }
-        guard let model = optValue(args, "--model")
-            ?? ProcessInfo.processInfo.environment["NEBULA_SUPERRES_MODEL"]
-        else { die("super-resolution model not found (set --model or NEBULA_SUPERRES_MODEL)") }
+        let model = resolve(.backgroundExtraction)
+        FileHandle.standardError.write(Data("bge model \(model.path) (smoothing \(opts.smoothing))\n".utf8))
+        result = try BgExtractor(model: model)
+            .extract(pixels: hwc, h: img.height, w: img.width, c: img.channels, smoothing: opts.smoothing)
+    default: // "superres" (parse() admits nothing else)
+        guard img.channels == 3 else { die("nebula-ai: superres requires an RGB FITS image") }
+        guard let model = opts.model ?? ProcessInfo.processInfo.environment["NEBULA_SUPERRES_MODEL"]
+        else { die("nebula-ai: super-resolution model not found (pass --model or set NEBULA_SUPERRES_MODEL)") }
         let upscaled = try SuperResolver(modelPath: model)
             .upscale(pixels: hwc, h: img.height, w: img.width)
         result = upscaled.0; outputHeight = upscaled.1; outputWidth = upscaled.2
-    default:
-        die("unknown command '\(cmd)' (expected denoise|bg|superres)")
     }
 
-    try fromHWC(result, width: outputWidth, height: outputHeight, channels: img.channels)
-        .write(URL(fileURLWithPath: outPath))
-    print("nebula-ai \(cmd): \(inPath) -> \(outPath)")
+    try FITSImage.fromHWC(result, width: outputWidth, height: outputHeight, channels: img.channels)
+        .write(URL(fileURLWithPath: opts.output))
+    print("nebula-ai \(opts.command): \(opts.input) -> \(opts.output)")
 } catch {
-    die("nebula-ai \(cmd) failed: \(error)")
+    die("nebula-ai \(opts.command) failed: \(error)")
 }

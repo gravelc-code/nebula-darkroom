@@ -68,12 +68,19 @@ enum CorrectionValidator {
         if b.blackClippedFraction > a.blackClippedFraction + 0.02 { notes.append("excess-black-clipping") }
         if b.whiteClippedFraction > a.whiteClippedFraction + 0.005 { notes.append("excess-white-clipping") }
         if b.backgroundCast > max(0.35, a.backgroundCast * 1.75) { notes.append("background-cast-worsened") }
+        // Sample whole pixels (every channel of each sampled pixel). Stepping
+        // through the flat array by a stride that happened to be a multiple
+        // of `channels` visited channel 0 only, so a correction that changed
+        // just green and blue read as "no meaningful change".
         var delta: Double = 0
-        let step = max(channels, before.count / 50_000)
-        var i = 0, count = 0
-        while i < before.count {
-            if before[i].isFinite && after[i].isFinite { delta += Double(abs(before[i] - after[i])); count += 1 }
-            i += step
+        let pixelCount = before.count / max(channels, 1)
+        let pixelStep = max(1, pixelCount / 50_000)
+        var count = 0
+        for p in Swift.stride(from: 0, to: pixelCount, by: pixelStep) {
+            for ch in 0..<channels {
+                let i = p * channels + ch
+                if before[i].isFinite && after[i].isFinite { delta += Double(abs(before[i] - after[i])); count += 1 }
+            }
         }
         if delta / Double(max(count, 1)) < 1e-7 { notes.append("no-meaningful-change") }
         return (notes.isEmpty, notes)

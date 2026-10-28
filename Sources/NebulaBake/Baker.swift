@@ -11,7 +11,7 @@ import UniformTypeIdentifiers
 /// The native Swift bake orchestrator (Phase 3) — replaces the Python
 /// `bake.py` seam. Register + stack via Siril (subprocess, classical DSP stays
 /// wrapped), then background-removal + denoise **in-process** via `NebulaAI`
-/// (no subprocess, no FITS round-trip), then emit the four layers + a typed
+/// (no subprocess, no FITS round-trip), then emit the five layers + a typed
 /// manifest. Never a dead end: each stage falls into a good-enough fallback.
 public struct Baker {
     public struct Progress: Sendable { public let fraction: Double; public let status: String }
@@ -30,15 +30,16 @@ public struct Baker {
     /// classical star mask so star controls keep working.
     let starnetCmd: String?
     /// Background removal is ON by default (the reference pipelines run it
-    /// unconditionally); `NEBULA_BACKGROUND_CORRECTION=0` disables it for
-    /// debugging. The untouched registered stack is always kept as `master`,
-    /// so the correction remains a separately-blendable layer, never a bake-in.
+    /// unconditionally). `NEBULA_BACKGROUND_CORRECTION` overrides the
+    /// parameter when set (`0` off, anything else on) for debugging. The
+    /// untouched registered stack is always kept as `master`, so the
+    /// correction remains a separately-blendable layer, never a bake-in.
     let applyBackgroundCorrection: Bool
     let applyNativeWhiteBalance: Bool
 
     public init(denoiseModel: String? = nil, bgeModel: String? = nil,
                 sirilBin: String? = nil, starnetCmd: String? = nil,
-                applyBackgroundCorrection: Bool = false,
+                applyBackgroundCorrection: Bool = true,
                 applyNativeWhiteBalance: Bool = true) {
         self.denoiseModel = denoiseModel
         self.bgeModel = bgeModel
@@ -64,29 +65,39 @@ public struct Baker {
             && fm.fileExists(atPath: cachedStack.path)
 
         var target: Target
+        var instrument: String?
         let masterStack: URL
         if reuseStack {
             onProgress(Progress(fraction: 0.10, status: "Reusing cached stack…"))
+            // Read before the stale outputs below are cleared: the previous
+            // manifest is where a reused stack's target metadata comes from.
             target = reusableTarget(outDir: outDir, subsDir: subsDir, master: cachedStack)
+            Self.removeStaleOutputs(in: outDir)
             masterStack = cachedStack
             outcomes.append(StageOutcome(stage: "register+stack", succeeded: true,
                                          fallback: "reused-cached-stack"))
             outcomes.append(StageOutcome(stage: "resolution", succeeded: true,
                                          fallback: "native-sampling-osc-safe"))
         } else {
+            Self.removeStaleOutputs(in: outDir)
             let selection = try SirilStage.selectLights(in: subsDir)
             target = makeTarget(subsDir: subsDir, selection: selection)
+            instrument = selection.lights.first?.header["INSTRUME"]
 
             // --- 1. Siril: compatible-filter selection, register + stack ----
             onProgress(Progress(fraction: 0.10, status: "Registering & stacking…"))
             guard let siril else { throw SirilStage.SirilError.notFound }
-            masterStack = try siril.stack(subsDir: subsDir, workDir: workDir, selection: selection)
-            outcomes.append(StageOutcome(stage: "register+stack", succeeded: true))
+            let stack = try siril.stack(subsDir: subsDir, workDir: workDir, selection: selection)
+            masterStack = stack.master
+            outcomes.append(stack.outcome)
             outcomes.append(StageOutcome(stage: "resolution", succeeded: true,
                                          fallback: "native-sampling-osc-safe"))
-            if selection.skippedIncompatible > 0 {
+            var skipped: [String] = []
+            if selection.skippedIncompatible > 0 { skipped.append("excluded-\(selection.skippedIncompatible)-incompatible") }
+            if selection.skippedUnreadable > 0 { skipped.append("skipped-\(selection.skippedUnreadable)-unreadable") }
+            if !skipped.isEmpty {
                 outcomes.append(StageOutcome(stage: "frame-selection", succeeded: true,
-                                             fallback: "excluded-\(selection.skippedIncompatible)-incompatible"))
+                                             fallback: skipped.joined(separator: ",")))
             }
         }
 
@@ -97,13 +108,15 @@ public struct Baker {
         // What the stacker actually used. Registration drops frames it can't
         // solve and the stack filters the worst, so this is routinely 10-35%
         // below the accepted count — report the honest figure, never the input.
-        if let cards = try? FITSImage.readHeaderCards(masterStack) {
+        if let cards = try? FITSHeader.read(masterStack) {
             if let n = Int(cards["STACKCNT"] ?? ""), n > 0 {
                 target.capture.stackedFrameCount = min(n, target.capture.frameCount)
             }
             if let live = Double(cards["LIVETIME"] ?? ""), live > 0 {
                 target.capture.stackedIntegrationSeconds = live
             }
+            // Siril carries the reference sub's INSTRUME into the master.
+            if instrument == nil { instrument = cards["INSTRUME"] }
         }
 
         // --- 2. Background removal FIRST — the reference-pipeline order:
@@ -113,16 +126,16 @@ public struct Baker {
         onProgress(Progress(fraction: 0.30, status: "Removing sky gradient…"))
         let backgroundCorrected: [Float]
         var bgeRan = false
-        let wantsBackground = applyBackgroundCorrection
-            || ProcessInfo.processInfo.environment["NEBULA_BACKGROUND_CORRECTION"] != "0"
-        if wantsBackground,
+        if Self.wantsBackgroundCorrection(applyBackgroundCorrection),
            let bge = bgeModel ?? discover("bge-ai-models", "NEBULA_BGE_MODEL") {
             // GraXpert's own default smoothing (0.5): without it the background
             // model follows real nebulosity and eats frame-filling targets.
-            backgroundCorrected = try BgExtractor(modelPath: bge)
-                .extract(pixels: masterHWC, h: h, w: w, c: c, smoothing: 0.5)
-            bgeRan = true
-            outcomes.append(StageOutcome(stage: "background-removal", succeeded: true))
+            let stage = try Self.aiStage("background-removal", input: masterHWC, workDir: workDir) {
+                try BgExtractor(modelPath: bge).extract(pixels: masterHWC, h: h, w: w, c: c, smoothing: 0.5)
+            }
+            backgroundCorrected = stage.pixels
+            bgeRan = stage.outcome.succeeded
+            outcomes.append(stage.outcome)
         } else {
             backgroundCorrected = masterHWC
             outcomes.append(StageOutcome(stage: "background-removal", succeeded: true,
@@ -130,22 +143,35 @@ public struct Baker {
         }
 
         // --- 3. Catalogue colour on the gradient-free master ----------------
+        try Task.checkCancellation()
         onProgress(Progress(fraction: 0.42, status: "Balancing colour…"))
         var colourMethod = ColourMethod.nativeWhiteBalance
         var calibrated = backgroundCorrected
         if target.capture.isBroadband, let siril {
             // Hand Siril the bg-removed pixels under the ORIGINAL header so the
             // plate solve keeps its astrometry seed.
-            var solveInput = masterStack
+            var solveInput: URL? = masterStack
             if bgeRan {
                 let bgURL = workDir.appendingPathComponent("master_bg.fits")
-                if (try? FITSImage.writeReplacingPixels(template: masterStack, to: bgURL,
-                                                        hwc: backgroundCorrected,
-                                                        width: w, height: h, channels: c)) != nil {
+                do {
+                    try FITSImage.writeReplacingPixels(template: masterStack, to: bgURL,
+                                                       hwc: backgroundCorrected,
+                                                       width: w, height: h, channels: c)
                     solveInput = bgURL
+                } catch {
+                    // Never fall back to PCC on the raw master here: its
+                    // output would REPLACE the gradient-removed pixels — the
+                    // removal silently undone while the outcome still said
+                    // it ran, and the colour fit biased by the very gradient
+                    // Siril warns about. The native balance below runs on the
+                    // gradient-free pixels instead.
+                    solveInput = nil
+                    Self.appendLog("colour: couldn't hand the gradient-free master to Siril: \(error)\n",
+                                   to: workDir.appendingPathComponent("colour_pcc.log"))
                 }
             }
-            if let pcc = try? siril.photometricColour(master: solveInput, workDir: workDir),
+            if let solveInput,
+               let pcc = try Self.attempt({ try siril.photometricColour(master: solveInput, workDir: workDir) }),
                let pccImage = try? FITSImage.read(pcc) {
                 // Siril normalises the largest PCC gain to 1, so calibration is
                 // always a net dimming (M 42 lost half its red flux). A single
@@ -156,32 +182,63 @@ public struct Baker {
                 colourMethod = .pcc
                 outcomes.append(StageOutcome(stage: "colour", succeeded: true))
             } else {
-                outcomes.append(StageOutcome(stage: "colour", succeeded: true,
-                                             fallback: "catalogue-unavailable-native-balance"))
+                outcomes.append(StageOutcome(stage: "colour", succeeded: solveInput != nil, fallback:
+                    solveInput == nil ? "gradient-handoff-failed-native-balance"
+                                      : "catalogue-unavailable-native-balance"))
             }
         } else {
             outcomes.append(StageOutcome(stage: "colour", succeeded: true,
                                          fallback: "narrowband-master-preserved"))
         }
         if colourMethod != .pcc && applyNativeWhiteBalance {
+            let duoBand = !target.capture.isBroadband && Self.hasSeestarS50Response(instrument: instrument)
             calibrated = Self.nativeWhiteBalance(calibrated, h: h, w: w, c: c,
-                                                 broadband: target.capture.isBroadband)
+                                                 broadband: target.capture.isBroadband,
+                                                 saturationReference: masterHWC,
+                                                 duoBandResponse: duoBand)
+            if !target.capture.isBroadband && !duoBand {
+                outcomes.append(StageOutcome(stage: "duo-band-recombine", succeeded: true,
+                                             fallback: "unknown-instrument-neutralise-only"))
+            }
         }
         let validation = CorrectionValidator.accept(before: masterHWC, after: calibrated, channels: c)
         // A correction is only an optional alternative layer. If numerical
-        // safeguards reject it, corrected becomes an exact master passthrough.
-        let correctedHWC = validation.0 ? calibrated : masterHWC
+        // safeguards reject it, step back one correction at a time. The
+        // validator judged gradient removal AND colour together, so a
+        // rejection does not condemn the gradient removal: it is a separate
+        // step with its own model, and is kept if it passes on its own.
+        // Only if it doesn't is corrected an exact master passthrough.
+        var correctedHWC = calibrated
         if !validation.0 {
-            outcomes.append(StageOutcome(stage: "correction-validation", succeeded: false,
-                                         fallback: validation.1.joined(separator: ",")))
+            let notes = validation.1.joined(separator: ",")
+            if bgeRan, CorrectionValidator.accept(before: masterHWC, after: backgroundCorrected,
+                                                  channels: c).0 {
+                correctedHWC = backgroundCorrected
+                outcomes.append(StageOutcome(stage: "correction-validation", succeeded: false,
+                                             fallback: notes + ";colour-dropped-gradient-removal-kept"))
+            } else {
+                correctedHWC = masterHWC
+                outcomes.append(StageOutcome(stage: "correction-validation", succeeded: false,
+                                             fallback: notes + ";master-preserved"))
+            }
+            // The layer no longer holds the catalogue colour, so don't claim
+            // it did. (`ColourMethod` has no "uncalibrated" case; the outcome
+            // above records exactly what the layer holds.)
+            colourMethod = .nativeWhiteBalance
         }
 
         // --- 4. Denoise (in-process) -> its own layer ----------------------
+        try Task.checkCancellation()
         onProgress(Progress(fraction: 0.55, status: "Denoising…"))
         let denoisedHWC: [Float]
         if let dn = denoiseModel ?? discover("denoise-ai-models", "NEBULA_DENOISE_MODEL") {
-            denoisedHWC = try Denoiser(modelPath: dn).denoise(pixels: correctedHWC, h: h, w: w, c: c, strength: 1.0)
-            outcomes.append(StageOutcome(stage: "denoise", succeeded: true))
+            let stage = try Self.aiStage("denoise", input: correctedHWC, workDir: workDir) {
+                try Self.withinUnitRange(correctedHWC) { unit in
+                    try Denoiser(modelPath: dn).denoise(pixels: unit, h: h, w: w, c: c, strength: 1.0)
+                }
+            }
+            denoisedHWC = stage.pixels
+            outcomes.append(stage.outcome)
         } else {
             denoisedHWC = correctedHWC
             outcomes.append(StageOutcome(stage: "denoise", succeeded: true,
@@ -193,6 +250,7 @@ public struct Baker {
         // big fuzzy star to a model; a nebula filament trips a threshold). Every
         // candidate must pass the extended-flux validator: the wide-blur
         // above-sky flux — the subject — has to survive in the starless layer.
+        try Task.checkCancellation()
         onProgress(Progress(fraction: 0.72, status: "Separating stars…"))
         var starlessHWC: [Float]?
         var separationDetail = "separation-unavailable"
@@ -214,7 +272,9 @@ public struct Baker {
             return true
         }
         if let cmd = starnetCmd ?? ProcessInfo.processInfo.environment["NEBULA_STARNET"] ?? Self.discoverStarNet() {
-            if let sep = try? runStarSeparation(cmd, masterHWC: correctedHWC, w: w, h: h, c: c, workDir: workDir) {
+            if let sep = try Self.attempt({
+                try runStarSeparation(cmd, masterHWC: correctedHWC, w: w, h: h, c: c, workDir: workDir)
+            }) {
                 if !accepted(sep, "model") {
                     outcomes.append(StageOutcome(stage: "star-separation-model", succeeded: false,
                                                  fallback: "subject-flux-lost-classical-star-mask"))
@@ -229,22 +289,20 @@ public struct Baker {
                                                 h: h, w: w, c: c), "classical")
         }
         if starlessHWC == nil {
-            _ = accepted(Self.classicalStarless(master: correctedHWC, detection: denoisedHWC,
-                                                h: h, w: w, c: c,
-                                                knee: 6.5, radiusCap: 4, regain: 1.5), "conservative")
-        }
-        if starlessHWC == nil {
-            // Never a dead end: fade the gentlest candidate back toward the
-            // master until the subject demonstrably survives. Star controls
-            // keep working (weaker) and the subject can no longer be destroyed.
-            var cand = Self.classicalStarless(master: correctedHWC, detection: denoisedHWC,
-                                              h: h, w: w, c: c,
-                                              knee: 6.5, radiusCap: 4, regain: 1.5)
-            for _ in 0..<4 where starlessHWC == nil {
-                for i in 0..<cand.count { cand[i] = (cand[i] + correctedHWC[i]) * 0.5 }
-                _ = accepted(cand, "scaled")
+            let conservative = Self.classicalStarless(master: correctedHWC, detection: denoisedHWC,
+                                                      h: h, w: w, c: c,
+                                                      knee: 6.5, radiusCap: 4, regain: 1.5)
+            if !accepted(conservative, "conservative") {
+                // Never a dead end: fade the gentlest candidate back toward the
+                // master until the subject demonstrably survives. Star controls
+                // keep working (weaker) and the subject can no longer be destroyed.
+                var cand = conservative
+                for _ in 0..<4 where starlessHWC == nil {
+                    for i in 0..<cand.count { cand[i] = (cand[i] + correctedHWC[i]) * 0.5 }
+                    _ = accepted(cand, "scaled")
+                }
+                if starlessHWC == nil { starlessHWC = correctedHWC }
             }
-            if starlessHWC == nil { starlessHWC = correctedHWC }
         }
         outcomes.append(StageOutcome(stage: "star-separation", succeeded: true,
                                      fallback: separationDetail))
@@ -252,7 +310,9 @@ public struct Baker {
         var starsHWC = [Float](repeating: 0, count: masterHWC.count)
         for i in 0..<starsHWC.count { starsHWC[i] = max(correctedHWC[i] - starlessHWC![i], 0) }
 
-        // --- 5. Write the four layers --------------------------------------
+        // --- 5. Write the five layers --------------------------------------
+        // Last cancel point: past here the layers and manifest get written.
+        try Task.checkCancellation()
         onProgress(Progress(fraction: 0.85, status: "Writing layers…"))
         func writeLayer(_ hwc: [Float], _ name: String) throws -> LayerRef {
             let url = outDir.appendingPathComponent("\(name).fits")
@@ -277,11 +337,12 @@ public struct Baker {
         let qualityData = try JSONEncoder.quality.encode(quality)
         try qualityData.write(to: outDir.appendingPathComponent("quality.json"), options: .atomic)
 
-        // --- 6. Manifest ---------------------------------------------------
+        // --- 6. Manifest — LAST, atomically: its presence is what says the
+        // layers beside it are complete and belong together. ---------------
         let manifest = Manifest(target: target, look: target.profile.initialLook,
                                 colourMethod: colourMethod, layers: layers,
                                 stageOutcomes: outcomes + [StageOutcome(stage: "pipeline-v\(Self.pipelineVersion)", succeeded: true)])
-        try manifest.jsonData().write(to: outDir.appendingPathComponent("manifest.json"))
+        try manifest.jsonData().write(to: outDir.appendingPathComponent("manifest.json"), options: .atomic)
         onProgress(Progress(fraction: 1.0, status: "Done"))
         return manifest
     }
@@ -302,6 +363,59 @@ public struct Baker {
         if f.isEmpty { return false }
         return f == "lp" || f.contains("duo") || f.contains("narrow")
             || f.contains("ha") || f.contains("oiii")
+    }
+
+    /// Whether the data came from a Seestar **S50**, whose duo-band response
+    /// matrix `duoBandRecombine` inverts. That matrix is computed from
+    /// Siril's SPCC profiles for the S50's own sensor × LP filter, so it is
+    /// only valid there. The S30 has a different sensor (Sony IMX662 vs the
+    /// S50's IMX462) and writes `INSTRUME = 'Seestar S30'` (S50 subs write
+    /// `'Seestar S50'`); "S50 Pro"-style variants and third-party duo-band
+    /// data are not known to share the response either. An exact match keeps
+    /// everything else on background neutralisation only, which preserves
+    /// whatever line ratio the sensor recorded.
+    static func hasSeestarS50Response(instrument: String?) -> Bool {
+        (instrument ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            .caseInsensitiveCompare("Seestar S50") == .orderedSame
+    }
+
+    /// The parameter decides; `NEBULA_BACKGROUND_CORRECTION`, when set, is a
+    /// debugging override (`0` = off, anything else = on).
+    static func wantsBackgroundCorrection(_ parameter: Bool,
+                                          environment: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
+        guard let override = environment["NEBULA_BACKGROUND_CORRECTION"] else { return parameter }
+        return override != "0"
+    }
+
+    /// The five layers a bake writes, by file stem.
+    static let layerNames = ["master", "corrected", "denoised", "starless", "stars"]
+
+    /// Clear what a previous bake left in `outDir` before this one starts, so
+    /// a bake that fails or is interrupted can never leave an old manifest
+    /// describing new (or half-written) layers. Staged app bakes start in an
+    /// empty folder; this matters when baking straight into a folder (the
+    /// CLI). Logs, `_work/` (a reusable stack) and `source.txt` are kept.
+    static func removeStaleOutputs(in outDir: URL) {
+        let fm = FileManager.default
+        for name in ["manifest.json", "quality.json", "thumb.png"] + layerNames.map({ "\($0).fits" }) {
+            try? fm.removeItem(at: outDir.appendingPathComponent(name))
+        }
+    }
+
+    /// Run `body` on pixels guaranteed to lie in [0, 1], and return its result
+    /// on the original scale. Float layers are no longer clamped at 1, but
+    /// the GraXpert denoise pipeline is defined on [0, 1] and clips its output
+    /// there. That pipeline normalises by the channel median and MAD — both
+    /// scale exactly with the input — and its keep-bright threshold is
+    /// expressed in those units, so dividing by the peak and multiplying back
+    /// is exact everywhere except the final clip it avoids. Identity when
+    /// nothing exceeds 1 (the usual case).
+    static func withinUnitRange(_ pixels: [Float], _ body: ([Float]) throws -> [Float]) rethrows -> [Float] {
+        var peak: Float = 0
+        for v in pixels where v.isFinite { peak = max(peak, v) }
+        guard peak > 1 else { return try body(pixels) }
+        let scaled = try body(pixels.map { $0 / peak })
+        return scaled.map { $0 * peak }
     }
 
     /// Test seam for the header→`Target` classification (filter, band, profile).
@@ -346,7 +460,7 @@ public struct Baker {
         // filter in particular decides whether photometric calibration may run
         // at all, so guessing "broadband" would silently mis-calibrate any
         // duo-band stack handed to us directly.
-        let cards = master.flatMap { try? FITSImage.readHeaderCards($0) } ?? [:]
+        let cards = master.flatMap { try? FITSHeader.read($0) } ?? [:]
         let filter = cards["FILTER"]?.trimmingCharacters(in: .whitespacesAndNewlines)
         let object = cards["OBJECT"]
         let frames = Int(cards["STACKCNT"] ?? "") ?? 1
@@ -376,40 +490,21 @@ public struct Baker {
     }
 
     /// Locate a GraXpert ONNX model: env override → app bundle → Nebula's own
-    /// Models folder → dev build path → the GraXpert app's cache. The models are
-    /// never redistributed with Nebula; installing GraXpert (free, GPL) once
-    /// populates its cache and Nebula finds them there automatically.
+    /// Models folder → dev build path → the GraXpert app's cache (newest version,
+    /// compared numerically). The models are never redistributed with Nebula;
+    /// installing GraXpert (free, GPL) once populates its cache and Nebula finds
+    /// them there automatically. Delegates to NebulaAI's `ModelLocator`, which the
+    /// `nebula-ai` CLI shares, so app and CLI can't disagree. (The model's version
+    /// travels in its path; `Denoiser(modelPath:)` reads it for the threshold.)
     static func discoverModel(_ base: String, _ env: String) -> String? {
-        let fm = FileManager.default
-        if let e = ProcessInfo.processInfo.environment[env], fm.fileExists(atPath: e) { return e }
-        // Shipped app: a model bundled in Nebula.app/Contents/Resources/Models.
-        let bundled = base.contains("denoise") ? "denoise" : "bge"
-        if let u = Bundle.main.url(forResource: bundled, withExtension: "onnx", subdirectory: "Models") {
-            return u.path
-        }
-        // A model dropped into Nebula's own model home by the user.
-        let home = NSString(string: "~/Library/Application Support/Nebula/Models/\(bundled).onnx")
-            .expandingTildeInPath
-        if fm.fileExists(atPath: home) { return home }
-        let dev = URL(fileURLWithPath: fm.currentDirectoryPath)
-            .appendingPathComponent("build/Nebula.app/Contents/Resources/Models/\(bundled).onnx")
-        if fm.fileExists(atPath: dev.path) { return dev.path }
-        // The GraXpert app's model cache.
-        let root = NSString(string: "~/Library/Application Support/GraXpert/\(base)").expandingTildeInPath
-        guard let versions = try? fm.contentsOfDirectory(atPath: root) else { return nil }
-        for v in versions.sorted(by: >) {
-            let cand = "\(root)/\(v)/model.onnx"
-            if fm.fileExists(atPath: cand) { return cand }
-        }
-        return nil
+        ModelLocator.locate(graxpertDirectory: base, environmentVariable: env)?.path
     }
 
     /// True when both AI models (sky-gradient removal + denoise) are locatable.
     /// The app uses this to offer first-run guidance before a bake that would
     /// otherwise silently fall back to the non-AI path.
     public static func aiModelsAvailable() -> Bool {
-        discoverModel("bge-ai-models", "NEBULA_BGE_MODEL") != nil
-            && discoverModel("denoise-ai-models", "NEBULA_DENOISE_MODEL") != nil
+        ModelLocator.locate(.backgroundExtraction) != nil && ModelLocator.locate(.denoise) != nil
     }
 
     /// Run a StarNet-style star remover and return the starless HWC in LINEAR
@@ -418,9 +513,9 @@ public struct Baker {
     ///   2. StarNet is trained on *stretched* images; the near-black linear
     ///      master would hide all but the brightest stars.
     /// So we apply the same invertible per-channel MTF autostretch the engine
-    /// uses, hand StarNet a 16-bit PNG, then invert the stretch on the returned
+    /// uses, hand StarNet a 16-bit TIFF, then invert the stretch on the returned
     /// starless — restoring linear space where `stars = master - starless` holds.
-    /// The command template uses `{input}`/`{output}` (now PNG paths), e.g.
+    /// The command template uses `{input}`/`{output}` (TIFF paths), e.g.
     /// `starnet2 -i {input} -o {output}`.
     private func runStarSeparation(_ template: String, masterHWC: [Float],
                                    w: Int, h: Int, c: Int, workDir: URL) throws -> [Float] {
@@ -454,43 +549,34 @@ public struct Baker {
                 stretched[pix*3+ch] = Self.forwardStretch(masterHWC[pix*3+ch], shadow: sh[ch], midtone: mt[ch])
             }
         }
-        try Self.writePNG16(stretched, w: w, h: h, to: inURL)
+        try Self.writeTIFF16(stretched, w: w, h: h, to: inURL)
 
         let cmd = template
             .replacingOccurrences(of: "{input}", with: inURL.path)
             .replacingOccurrences(of: "{output}", with: outURL.path)
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/bin/bash")
-        p.arguments = ["-c", cmd]
         // starnet2 builds resolve their weights relative to the working
         // directory, so run from the binary's own directory when we can tell.
+        var cwd: URL?
         if let bin = Self.commandBinaryPath(template), fm.isExecutableFile(atPath: bin) {
-            p.currentDirectoryURL = URL(fileURLWithPath: bin).deletingLastPathComponent()
+            cwd = URL(fileURLWithPath: bin).deletingLastPathComponent()
         }
         let logURL = workDir.appendingPathComponent("star-separation.log")
         fm.createFile(atPath: logURL.path, contents: nil)
-        let log = try FileHandle(forWritingTo: logURL)
-        try? log.write(contentsOf: Data((cmd + "\n").utf8))
         var sample: [Float] = []
         sample.reserveCapacity(stretched.count / 64 + 1)
         var si = 0
         while si < stretched.count { sample.append(stretched[si]); si += 64 }
         sample.sort()
         let p99 = sample[Int(Float(sample.count) * 0.99)]
-        try? log.write(contentsOf: Data(String(format: "input-p99=%.3f\n", p99).utf8))
-        p.standardOutput = log; p.standardError = log
-        try p.run()
-        while p.isRunning {
-            if Task.isCancelled { p.terminate(); try? log.close(); throw CancellationError() }
-            Thread.sleep(forTimeInterval: 0.2)
-        }
-        try? log.close()
+        Self.appendLog(cmd + "\n" + String(format: "input-p99=%.3f\n", p99), to: logURL)
+        try Self.runStarCommand(cmd, workingDirectory: cwd, log: logURL,
+                                timeout: Self.starSeparationTimeout(width: w, height: h))
         guard fm.fileExists(atPath: outURL.path) else {
             throw NSError(domain: "NebulaBake", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "starnet produced no output"])
         }
         // Invert the stretch so the starless returns to linear space.
-        let starlessStretched = try Self.readPNG16(outURL, w: w, h: h)
+        let starlessStretched = try Self.readTIFF16(outURL, w: w, h: h)
         var out = [Float](repeating: 0, count: masterHWC.count)
         for pix in 0..<(w * h) {
             for ch in 0..<3 {
@@ -529,6 +615,52 @@ public struct Baker {
         return bin.hasPrefix("/") ? bin : nil
     }
 
+    /// How long a star-separation command may run before it is treated as
+    /// hung. Measured (2026-10-27): `/usr/local/bin/starnet2` (CoreML model
+    /// package) separated a 1080×1920 S50-size frame in 3.93 s wall on an
+    /// Apple M5 = 1.9 s per megapixel. A build or Mac without that
+    /// acceleration runs the same network on the CPU, so the budget allows
+    /// 60 s/MP (~30× the measured rate), with a 5-minute floor for model
+    /// load — an S50 frame (124 s by rate) gets the floor. Observed in
+    /// testing: the same binary once sat in "Loading CoreML model package"
+    /// past 300 s on a run where it otherwise takes 2–4 s; the deadline is
+    /// what turned that into the classical-mask fallback instead of a bake
+    /// that never finished.
+    static func starSeparationTimeout(width: Int, height: Int) -> TimeInterval {
+        max(300, 60 * Double(width * height) / 1_000_000)
+    }
+
+    /// Run a star-separation shell template in its own process group with a
+    /// deadline, and require it to succeed.
+    ///
+    /// · `pipefail`: bash otherwise reports only a pipeline's last stage, so
+    ///   a failed StarNet piped into anything read as success.
+    /// · Exit status 0 is required — a non-zero exit (StarNet exits 255 on an
+    ///   image smaller than its window) can still leave a partial or stale
+    ///   output file, which must never be decoded as the starless layer.
+    /// · Cancel and timeout stop the whole group, not just bash, and return
+    ///   only once it has exited, so nothing still writes into the scratch dir
+    ///   when it is deleted.
+    static func runStarCommand(_ cmd: String, workingDirectory: URL?, log: URL,
+                               timeout: TimeInterval, shell: String = "/bin/bash") throws {
+        try Task.checkCancellation()
+        let child = try ChildProcess(executable: shell, arguments: ["-o", "pipefail", "-c", cmd],
+                                     workingDirectory: workingDirectory, log: log)
+        let ending = child.wait(until: Date().addingTimeInterval(timeout))
+        switch ending {
+        case .cancelled:
+            throw CancellationError()
+        case .exited(0):
+            return
+        default:
+            let what = ending == .timedOut ? "timed out after \(Int(timeout)) s"
+                                           : SirilStage.describe(ending)
+            appendLog("Nebula: star separation \(what)\n", to: log)
+            throw NSError(domain: "NebulaBake", code: 2,
+                          userInfo: [NSLocalizedDescriptionKey: "star separation \(what)"])
+        }
+    }
+
     // MARK: - Invertible MTF autostretch (the same closed form the shader uses)
 
     static func mtf(_ x: Float, _ m: Float) -> Float {
@@ -549,10 +681,10 @@ public struct Baker {
         return s * (1 - shadow) + shadow
     }
 
-    // MARK: - 16-bit PNG bridge for StarNet (RGB, top-row-first)
+    // MARK: - 16-bit TIFF bridge for StarNet (RGB, top-row-first)
 
-    /// Encode HWC RGB floats (0…1) as a 16-bit PNG.
-    static func writePNG16(_ rgb: [Float], w: Int, h: Int, to url: URL) throws {
+    /// Encode HWC RGB floats (0…1) as a 16-bit TIFF.
+    static func writeTIFF16(_ rgb: [Float], w: Int, h: Int, to url: URL) throws {
         var px = [UInt16](repeating: 0, count: w * h * 4)
         for i in 0..<(w * h) {
             for ch in 0..<3 { px[i*4+ch] = UInt16(min(max(rgb[i*3+ch], 0), 1) * 65535 + 0.5) }
@@ -577,40 +709,109 @@ public struct Baker {
         }
     }
 
-    /// Decode a StarNet output image to HWC RGB floats at the expected size.
-    /// Reads the decoded image's raw samples directly (no CGContext draw, which
-    /// colour-manages and resamples) so the round trip is exact. Handles 16- or
-    /// 8-bit, RGB or RGBA, whatever StarNet emitted.
-    static func readPNG16(_ url: URL, w: Int, h: Int) throws -> [Float] {
+    /// Decode a StarNet output image (TIFF or PNG) to HWC RGB floats at the
+    /// expected size.
+    static func readTIFF16(_ url: URL, w: Int, h: Int) throws -> [Float] {
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let img = CGImageSourceCreateImageAtIndex(src, 0, nil),
-              let provider = img.dataProvider, let raw = provider.data as Data? else {
+              let img = CGImageSourceCreateImageAtIndex(src, 0, nil) else {
             throw NSError(domain: "NebulaBake", code: 6,
                           userInfo: [NSLocalizedDescriptionKey: "cannot read StarNet output"])
         }
-        let bpc = img.bitsPerComponent
-        let comps = img.bitsPerPixel / bpc          // 3 (RGB) or 4 (RGBA/RGBX)
-        let rowBytes = img.bytesPerRow
-        let little = img.bitmapInfo.contains(.byteOrder16Little) || img.bitmapInfo.contains(.byteOrder32Little)
-        guard bpc == 16 || bpc == 8, comps >= 3, img.width == w, img.height == h else {
+        return try decodeRGB(img, w: w, h: h)
+    }
+
+    /// RGB samples of a decoded image as HWC floats in [0, 1].
+    ///
+    /// The usual case — 8- or 16-bit integer RGB(A) — is read straight from
+    /// the decoded samples, so the round trip is exact (a CGContext draw
+    /// colour-manages). That needs the layout decoded properly:
+    /// · byte order is an enum FIELD of `CGBitmapInfo`, not a set of flags:
+    ///   `.byteOrder16Big` (0x3000) "contains" `.byteOrder16Little` (0x1000),
+    ///   so a flag test decoded big-endian samples unswapped. Compare
+    ///   `intersection(.byteOrderMask)` instead. For 16-bit samples the
+    ///   default order is big-endian; a 32-bit little order on 8-bit samples
+    ///   reverses each 4-byte pixel (BGRA/ABGR in memory);
+    /// · alpha may come first or last, premultiplied or not.
+    /// Anything else (float or 32-bit samples, grey, indexed) is redrawn into
+    /// a known 16-bit RGBX context — colour-managed, so approximate, but
+    /// never misread.
+    static func decodeRGB(_ img: CGImage, w: Int, h: Int) throws -> [Float] {
+        guard img.width == w, img.height == h else {
+            throw NSError(domain: "NebulaBake", code: 7,
+                          userInfo: [NSLocalizedDescriptionKey: "unexpected StarNet output size"])
+        }
+        if let exact = decodeIntegerRGB(img) { return exact }
+        let space = img.colorSpace?.model == .rgb ? img.colorSpace!
+            : (CGColorSpace(name: CGColorSpace.linearSRGB) ?? CGColorSpaceCreateDeviceRGB())
+        let info = CGImageAlphaInfo.noneSkipLast.rawValue | CGBitmapInfo.byteOrder16Little.rawValue
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 16,
+                                  bytesPerRow: w * 8, space: space, bitmapInfo: info) else {
+            throw NSError(domain: "NebulaBake", code: 7,
+                          userInfo: [NSLocalizedDescriptionKey: "unexpected StarNet output format"])
+        }
+        ctx.interpolationQuality = .none
+        ctx.draw(img, in: CGRect(x: 0, y: 0, width: w, height: h))
+        guard let base = ctx.data else {
             throw NSError(domain: "NebulaBake", code: 7,
                           userInfo: [NSLocalizedDescriptionKey: "unexpected StarNet output format"])
         }
         var out = [Float](repeating: 0, count: w * h * 3)
+        let samples = base.bindMemory(to: UInt16.self, capacity: w * h * 4)
+        for p in 0..<(w * h) { for ch in 0..<3 {
+            out[p*3+ch] = Float(UInt16(littleEndian: samples[p*4+ch])) / 65535
+        } }
+        return out
+    }
+
+    /// Exact read of 8/16-bit integer RGB(A) samples; nil for any other layout.
+    private static func decodeIntegerRGB(_ img: CGImage) -> [Float]? {
+        let bpc = img.bitsPerComponent
+        let info = img.bitmapInfo
+        guard bpc == 8 || bpc == 16, !info.contains(.floatComponents),
+              img.colorSpace?.model == .rgb,
+              let raw = img.dataProvider?.data as Data? else { return nil }
+        let alpha = img.alphaInfo
+        let comps = alpha == .none ? 3 : 4
+        guard img.bitsPerPixel == comps * bpc else { return nil }
+        let alphaFirst = [.first, .premultipliedFirst, .noneSkipFirst].contains(alpha)
+        let premultiplied = alpha == .premultipliedFirst || alpha == .premultipliedLast
+        let order = info.intersection(.byteOrderMask)
+        // Logical component index (in the declared RGBA/ARGB order) → index
+        // of that component in memory.
+        var memoryIndex = Array(0..<comps)
+        var littleSamples = false
+        switch (bpc, order) {
+        case (16, .byteOrder16Little): littleSamples = true
+        case (16, .byteOrder16Big), (16, []): break
+        case (8, .byteOrder32Little) where comps == 4: memoryIndex = [3, 2, 1, 0]
+        case (8, .byteOrder32Big), (8, []): break
+        default: return nil
+        }
+        let colourBase = alphaFirst ? 1 : 0
+        let alphaIndex = alpha == .none ? nil : (alphaFirst ? 0 : 3)
+        let (w, h, rowBytes) = (img.width, img.height, img.bytesPerRow)
+        let maxValue: Float = bpc == 16 ? 65535 : 255
+        guard rowBytes >= w * comps * bpc / 8, raw.count >= rowBytes * (h - 1) + w * comps * bpc / 8 else {
+            return nil
+        }
+        var out = [Float](repeating: 0, count: w * h * 3)
         raw.withUnsafeBytes { (buf: UnsafeRawBufferPointer) in
+            func sample(_ row: UnsafeRawPointer, _ x: Int, _ logical: Int) -> Float {
+                let m = memoryIndex[logical]
+                if bpc == 16 {
+                    let v = row.loadUnaligned(fromByteOffset: (x * comps + m) * 2, as: UInt16.self)
+                    return Float(littleSamples ? UInt16(littleEndian: v) : UInt16(bigEndian: v)) / maxValue
+                }
+                return Float(row.load(fromByteOffset: x * comps + m, as: UInt8.self)) / maxValue
+            }
             let base = buf.baseAddress!
             for y in 0..<h {
                 let row = base + y * rowBytes
                 for x in 0..<w {
+                    let a: Float = premultiplied ? alphaIndex.map { sample(row, x, $0) } ?? 1 : 1
                     for ch in 0..<3 {
-                        let o = (y*w+x)*3+ch
-                        if bpc == 16 {
-                            let p = row.load(fromByteOffset: (x*comps+ch)*2, as: UInt16.self)
-                            out[o] = Float(little ? p : p.byteSwapped) / 65535
-                        } else {
-                            let v = row.load(fromByteOffset: x*comps+ch, as: UInt8.self)
-                            out[o] = Float(v) / 255
-                        }
+                        let v = sample(row, x, colourBase + ch)
+                        out[(y*w+x)*3+ch] = premultiplied ? (a > 0 ? min(v / a, 1) : 0) : v
                     }
                 }
             }
@@ -625,6 +826,16 @@ public struct Baker {
     /// dimmed. One scalar restores the pre-calibration above-sky luminance
     /// scale (measured robustly at P95); the calibrated channel ratios — the
     /// actual photometric colour — pass through unchanged.
+    ///
+    /// No clamp at 1: `min(v·s, 1)` per channel broke exactly that promise —
+    /// with s up to 3, a bright core's strongest channel stopped at 1 while
+    /// the others kept rising, shifting its hue toward white/yellow. Nothing
+    /// downstream needs layers ≤ 1: they are float32 FITS; the engine's base
+    /// stretch maps luminance ≥ 1 to white by scaling all three channels by
+    /// one factor (`withLuminance`) and its highlight guard brings any
+    /// remaining out-of-gamut channel in by desaturating, not clipping; the
+    /// validator counts ≥ 0.999 as white either way; and the denoiser is fed
+    /// through `withinUnitRange`.
     static func renormaliseLuminance(reference: [Float], calibrated: [Float],
                                      c: Int) -> [Float] {
         guard c == 3, calibrated.count == reference.count else { return calibrated }
@@ -643,24 +854,68 @@ public struct Baker {
         // PCC can only have dimmed, so the factor is ≥ 1; the cap bounds a
         // degenerate fit from ever amplifying noise more than 3×.
         let s = min(max(p95AboveSky(reference) / p95AboveSky(calibrated), 1), 3)
-        var out = calibrated
-        for i in 0..<out.count { out[i] = min(out[i] * s, 1) }
-        return out
+        return calibrated.map { $0 * s }
     }
 
-    static func fallbackBackground(_ hwc: [Float], h: Int, w: Int, c: Int) -> [Float] {
-        hwc
+    /// Run one in-process AI stage without letting it end the bake. Discovery
+    /// already handles a *missing* model; this covers one that is found but
+    /// can't be used — a partial download, a corrupt file, or a newer GraXpert
+    /// release with a different input shape. The stage then passes its input
+    /// through unchanged, so the layer still exists and the sliders still work,
+    /// and the reason goes to `_work/ai.log`. Cancel is the one error that
+    /// must still propagate.
+    static func aiStage(_ stage: String, input: [Float], workDir: URL,
+                        _ run: () throws -> [Float]) throws -> (pixels: [Float], outcome: StageOutcome) {
+        do {
+            let out = try run()
+            guard out.count == input.count else {
+                throw NSError(domain: "NebulaBake", code: 4, userInfo: [NSLocalizedDescriptionKey:
+                    "model returned \(out.count) values for \(input.count)"])
+            }
+            return (out, StageOutcome(stage: stage, succeeded: true))
+        } catch let cancel as CancellationError {
+            throw cancel
+        } catch {
+            appendLog("\(stage): \(error)\n", to: workDir.appendingPathComponent("ai.log"))
+            return (input, StageOutcome(stage: stage, succeeded: false,
+                                        fallback: "model-failed-input-preserved"))
+        }
     }
 
-    static func fallbackDenoise(_ hwc: [Float], h: Int, w: Int, c: Int) -> [Float] {
-        hwc
+    /// `try?` for an optional stage that must still honour Cancel: an ordinary
+    /// failure means "use the fallback" (nil), but a cancellation propagates.
+    /// A bare `try?` swallowed it, so a cancelled bake ran on and was cached.
+    static func attempt<T>(_ body: () throws -> T?) throws -> T? {
+        do { return try body() }
+        catch let cancel as CancellationError { throw cancel }
+        catch { return nil }
+    }
+
+    static func appendLog(_ text: String, to url: URL) {
+        let fm = FileManager.default
+        try? fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if !fm.fileExists(atPath: url.path) { fm.createFile(atPath: url.path, contents: nil) }
+        guard let handle = try? FileHandle(forWritingTo: url) else { return }
+        defer { try? handle.close() }
+        _ = try? handle.seekToEnd()
+        try? handle.write(contentsOf: Data(text.utf8))
     }
 
     /// Neutralise the background, then use a robust sample of unsaturated bright
     /// pixels as a grey-world reference for broadband data. Narrowband data only
-    /// receives background neutralisation so its line ratios are preserved.
+    /// receives background neutralisation so its line ratios are preserved;
+    /// duo-band data from an instrument whose response is known
+    /// (`duoBandResponse`, the Seestar S50) is then unmixed and recombined.
+    ///
+    /// `saturationReference` is the unprocessed master: saturation is a
+    /// property of the RECORDED value — a core at the stack's full scale is
+    /// clipped however much sky sits under it — so the guard tests those
+    /// values, not the sky-subtracted signal. Testing the signal let a clipped
+    /// core (1.0) over a 0.15 sky pass as 0.85 and enter the white reference,
+    /// where its clipped channels bias the gains. Defaults to `hwc` itself.
     static func nativeWhiteBalance(_ hwc: [Float], h: Int, w: Int, c: Int,
-                                   broadband: Bool) -> [Float] {
+                                   broadband: Bool, saturationReference: [Float]? = nil,
+                                   duoBandResponse: Bool = false) -> [Float] {
         guard c == 3 else { return hwc }
         var samples = [[Float]](repeating: [], count: 3)
         for ch in 0..<3 { samples[ch].reserveCapacity(h * w / 16) }
@@ -684,11 +939,13 @@ public struct Baker {
             }
             let sorted = lumas.sorted()
             let threshold = sorted[min(sorted.count - 1, Int(Double(sorted.count) * 0.985))]
+            let recorded = saturationReference?.count == hwc.count ? saturationReference! : hwc
             p = 0
             while p < h * w {
                 let signal = (0..<3).map { max(hwc[p*3+$0] - bg[$0], 0) }
                 let lum = 0.2126*signal[0] + 0.7152*signal[1] + 0.0722*signal[2]
-                if lum >= threshold && signal.max()! < 0.9 {
+                let unsaturated = recorded[p*3] < 0.9 && recorded[p*3+1] < 0.9 && recorded[p*3+2] < 0.9
+                if lum >= threshold && unsaturated {
                     for ch in 0..<3 { sums[ch] += Double(signal[ch]) }
                     count += 1
                 }
@@ -700,11 +957,14 @@ public struct Baker {
                 for ch in 0..<3 { gains[ch] = min(1.8, max(0.55, target / max(means[ch], 1e-6))) }
             }
         }
+        // Floor at 0 (sub-sky noise), but no ceiling: a per-channel clamp at 1
+        // would undo the gains on exactly the bright pixels, changing their
+        // hue (see `renormaliseLuminance` for why nothing downstream needs ≤ 1).
         var out = hwc
         for i in 0..<(h*w) { for ch in 0..<3 {
-            out[i*3+ch] = min(max(commonBG + (hwc[i*3+ch] - bg[ch]) * gains[ch], 0), 1)
+            out[i*3+ch] = max(commonBG + (hwc[i*3+ch] - bg[ch]) * gains[ch], 0)
         } }
-        return broadband ? out : duoBandRecombine(out, h: h, w: w, c: c)
+        return broadband || !duoBandResponse ? out : duoBandRecombine(out, h: h, w: w, c: c)
     }
 
     /// Recombine duo-band (Ha + OIII) data so both emission lines are legible.
@@ -745,13 +1005,13 @@ public struct Baker {
             ha[p] = max(1.280 * r - 0.051 * g - 0.039 * b, 0)
             o3[p] = max(-0.420 * r + 1.074 * g + 0.573 * b, 0)
         }
-        func levels(_ a: [Float]) -> (median: Float, peak: Float) {
+        func median(_ a: [Float]) -> Float {
             var s: [Float] = []
             s.reserveCapacity(n / 8 + 1)
             var i = 0
             while i < n { s.append(a[i]); i += 8 }
             s.sort()
-            return (s[s.count / 2], s[min(s.count - 1, Int(Float(s.count) * 0.995))])
+            return s[s.count / 2]
         }
         // Align the PEDESTALS only — no amplitude boost.
         //
@@ -771,17 +1031,19 @@ public struct Baker {
         // IC 2944 stay correctly red. Pedestal alignment is kept because the
         // two bands collect different amounts of sky (30 nm vs 20 nm), and
         // matching medians is exactly background neutralisation.
-        let lh = levels(ha), lo = levels(o3)
-        for p in 0..<n { o3[p] = max(o3[p] - lo.median + lh.median, 0) }
+        let haSky = median(ha), o3Sky = median(o3)
+        for p in 0..<n { o3[p] = max(o3[p] - o3Sky + haSky, 0) }
 
         // Recompose. Green carries mostly OIII with a little Ha so red regions
         // stay warm rather than going magenta; blue is nearly pure OIII.
+        // Unclamped, like every float layer: a per-channel clip at 1 would
+        // shift the hue of bright line emission (Ha clipped while OIII rises).
         var out = [Float](repeating: 0, count: hwc.count)
         for p in 0..<n {
             let a = ha[p], o = o3[p]
-            out[p*3]     = min(a, 1)
-            out[p*3 + 1] = min(0.20 * a + 0.80 * o, 1)
-            out[p*3 + 2] = min(0.15 * a + 0.85 * o, 1)
+            out[p*3]     = a
+            out[p*3 + 1] = 0.20 * a + 0.80 * o
+            out[p*3 + 2] = 0.15 * a + 0.85 * o
         }
         return out
     }

@@ -16,7 +16,7 @@ let package = Package(
         // the renderer shared by the headless CLI and the interactive app.
         .library(name: "NebulaEngine", targets: ["NebulaEngine"]),
         // Headless export: renders one frame to PNG, proving the chain without
-        // any UI (`swift run nebula-render <dir> <preset> <out.png>`).
+        // any UI (`swift run nebula-render <dir> default|neutral <out.png>`).
         .executable(name: "nebula-render", targets: ["NebulaRender"]),
         // The interactive app: MTKView display-link loop + SwiftUI sliders.
         .executable(name: "NebulaApp", targets: ["NebulaApp"]),
@@ -86,7 +86,11 @@ let package = Package(
         ),
         .testTarget(
             name: "NebulaBakeTests",
-            dependencies: ["NebulaBake", "NebulaEngine"]
+            dependencies: ["NebulaBake", "NebulaEngine", "NebulaAI"]
+        ),
+        .testTarget(
+            name: "NebulaAppTests",
+            dependencies: ["NebulaApp", "NebulaBake", "NebulaCore", "NebulaEngine"]
         ),
         .testTarget(
             name: "NebulaAITests",
