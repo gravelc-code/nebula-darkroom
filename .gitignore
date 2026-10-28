@@ -21,3 +21,6 @@ prototype/synthetic/
 *.fits.tmp
 
 # Large binaries tracked via Git LFS instead (see .gitattributes)
+
+# Kanban tool's per-project status file (owner-local, never published)
+/MEMORY.md

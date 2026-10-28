@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Nebula contributors
 import Foundation
 
-/// The complete look: the ~8 floats that fully describe how a baked target is
+/// The complete look: the 11 floats that fully describe how a baked target is
 /// rendered. This is the single source of truth shared by the Metal engine, the
 /// UI sliders, and the manifest. It is small, `Codable`, and shareable as a preset.
 ///
@@ -47,6 +47,9 @@ extension LookState {
     /// is active, every creative and destructive stage off. This is the "before"
     /// reference (the raw stack made visible) — it must never alter real pixels.
     /// Colour is neutral (Saturation/Vibrance at the midpoint, Tint neutral).
+    /// Background 0 also switches off the finishing stages that have no slider
+    /// of their own (shadow neutralisation, the light SCNR, core whitening) —
+    /// see `EngineParams.finishing`.
     public static var neutral: LookState {
         LookState(percent: [.glow: 0, .saturation: 50, .vibrance: 50, .tint: 50,
                             .warmth: 50, .stars: 100, .contrast: 50, .background: 0,

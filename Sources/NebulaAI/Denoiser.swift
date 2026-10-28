@@ -68,17 +68,53 @@ func medianOf(_ v: [Float]) -> Float {
 public final class Denoiser {
     private let model: OrtModel
     private let window = 256, stride = 128
-    private let batchSize = 8                   // tiles per model.run
-    private let modelThreshold: Float = 10.0   // 3.x models
+    /// Tiles per `model.run`. Tiles are independent, so this changes memory and
+    /// speed, never pixels.
+    public let batchSize: Int
+    /// Normalised-value ceiling the model is trusted below (see `modelThreshold(for:)`).
+    public let modelThreshold: Float
 
-    public init(modelPath: String, useCoreML: Bool = false) throws {
+    /// `modelVersion` defaults to the version implied by a GraXpert cache path
+    /// (`…/denoise-ai-models/<version>/model.onnx`); an unversioned file keeps
+    /// the current-model threshold. `batchSize` defaults to `defaultBatchSize()`.
+    public init(modelPath: String, modelVersion: ModelVersion? = nil, batchSize: Int? = nil,
+                useCoreML: Bool = false) throws {
         model = try OrtModel(modelPath: modelPath, useCoreML: useCoreML)
+        modelThreshold = Self.modelThreshold(
+            for: modelVersion ?? ModelLocator.version(ofModelAt: modelPath))
+        self.batchSize = min(max(batchSize ?? Self.defaultBatchSize(), 1), 32)
     }
 
-    /// `pixels` is row-major HxWxC (C = 1 or 3), values in [0,1]. Returns same shape.
+    public convenience init(model: LocatedModel, batchSize: Int? = nil) throws {
+        try self.init(modelPath: model.path, modelVersion: model.version, batchSize: batchSize)
+    }
+
+    /// GraXpert `denoising.py:33-36`: `model_threshold = 1.0` when the model
+    /// path contains "1.0.0" or "1.1.0" (the first two denoise releases), else
+    /// `10.0`. Unknown versions are today's (3.x) models → 10.
+    public static func modelThreshold(for version: ModelVersion?) -> Float {
+        guard let v = version else { return 10 }
+        return v == ModelVersion(1, 0, 0) || v == ModelVersion(1, 1, 0) ? 1 : 10
+    }
+
+    /// GraXpert's own default is 4 (`denoising.py:14`); 8 amortises ORT call
+    /// overhead but measured 2.62 GB peak RSS vs 1.82 GB at 4 on a full Seestar
+    /// frame (audit 2026-10-27 #48) — too tight beside the rest of a bake on an
+    /// 8 GB Mac. So: 4 below 16 GB of RAM, 8 from 16 GB up.
+    public static func defaultBatchSize(
+        physicalMemory: UInt64 = ProcessInfo.processInfo.physicalMemory) -> Int {
+        physicalMemory < 16 << 30 ? 4 : 8
+    }
+
+    /// `pixels` is row-major HxWxC (C = 1 or 3), values in [0,1]. Returns same
+    /// shape, always finite. Throws (never traps) on a bad shape or model.
     public func denoise(pixels: [Float], h: Int, w: Int, c: Int,
                         strength: Float) throws -> [Float] {
-        let input = pixels
+        try AIInput.validate(count: pixels.count, h: h, w: w, c: c)
+        guard strength.isFinite else { throw AIError.invalidImage("strength \(strength)") }
+        let modelThreshold = self.modelThreshold, batchSize = self.batchSize
+        // NaN/Inf -> channel median; identity (same storage) for a finite image.
+        let input = AIInput.replacingNonFinite(pixels, h: h, w: w, c: c).pixels
 
         // median / MAD per channel from every-4th pixel (numpy image[::4,::4,:]).
         var median = [Float](repeating: 0, count: c)
@@ -87,21 +123,21 @@ public final class Denoiser {
             var sample: [Float] = []
             sample.reserveCapacity((h / 4 + 1) * (w / 4 + 1))
             var r = 0
-            while r < h { var x = 0; while x < w { sample.append(pixels[(r * w + x) * c + ch]); x += 4 }; r += 4 }
+            while r < h { var x = 0; while x < w { sample.append(input[(r * w + x) * c + ch]); x += 4 }; r += 4 }
             let m = medianOf(sample)
             median[ch] = m
             sample = sample.map { abs($0 - m) }
-            mad[ch] = medianOf(sample)
+            mad[ch] = AIInput.flooredMAD(medianOf(sample))
         }
 
         // Broadcast mono -> 3ch for the model.
         var img: Plane
         if c == 1 {
             var three = [Float](repeating: 0, count: h * w * 3)
-            for i in 0..<(h * w) { let v = pixels[i]; three[i*3] = v; three[i*3+1] = v; three[i*3+2] = v }
+            for i in 0..<(h * w) { let v = input[i]; three[i*3] = v; three[i*3+1] = v; three[i*3+2] = v }
             img = Plane(h: h, w: w, c: 3, d: three)
         } else {
-            img = Plane(h: h, w: w, c: c, d: pixels)
+            img = Plane(h: h, w: w, c: c, d: input)
         }
         let med3 = c == 1 ? [median[0], median[0], median[0]] : median
         let mad3 = c == 1 ? [mad[0], mad[0], mad[0]] : mad
@@ -113,8 +149,14 @@ public final class Denoiser {
         let dh = ith * stride - h
         let dw = itw * stride - w
 
-        if dh > 0 { img = img.appendRows((img.h - dh)..<img.h) }
-        if dw > 0 { img = img.appendCols((img.w - dw)..<img.w) }
+        // numpy `concatenate((img, img[h-dh:]))`. For h >= 64 that's one block
+        // (dh <= h) — identical to upstream. Below 64 px upstream's negative
+        // slice wraps and the tiles come out short (it crashes); repeating the
+        // same block-append until the grid is full keeps the same tiling rule.
+        var needRows = dh
+        while needRows > 0 { let k = min(needRows, img.h); img = img.appendRows((img.h - k)..<img.h); needRows -= k }
+        var needCols = dw
+        while needCols > 0 { let k = min(needCols, img.w); img = img.appendCols((img.w - k)..<img.w); needCols -= k }
         img = img.appendRows((img.h - offset)..<img.h)
         img = img.prependRows(0..<offset)
         img = img.appendCols((img.w - offset)..<img.w)
@@ -133,7 +175,7 @@ public final class Denoiser {
         while jb < jobs.count {
             try Task.checkCancellation()      // stop promptly if the bake is cancelled
             let n = min(batchSize, jobs.count - jb)
-            var input = [Float](repeating: 0, count: n * tileFloats)
+            var batch = [Float](repeating: 0, count: n * tileFloats)
             var copy = [Float](repeating: 0, count: n * tileFloats)
             for b in 0..<n {
                 let (i, j) = jobs[jb + b]
@@ -147,13 +189,14 @@ public final class Denoiser {
                         for ch in 0..<3 {
                             let norm = (img.d[s + ch] - med3[ch]) / mad3[ch] * 0.04
                             copy[t + ch] = norm
-                            input[t + ch] = min(max(norm, -modelThreshold), modelThreshold)
+                            batch[t + ch] = min(max(norm, -modelThreshold), modelThreshold)
                         }
                     }
                 }
             }
 
-            let result = try model.run(input, shape: [n, window, window, 3])
+            let result = try model.run(batch, shape: [n, window, window, 3],
+                                       expectedCount: n * tileFloats)
 
             for b in 0..<n {
                 let (i, j) = jobs[jb + b]
@@ -167,7 +210,10 @@ public final class Denoiser {
                         let t = base + (ty * window + tx) * 3
                         let dst = (dstRow + (y + offset + ox)) * 3
                         for ch in 0..<3 {
-                            var v = copy[t + ch] < modelThreshold ? result[t + ch] : copy[t + ch]
+                            // Upstream keeps the input where the model isn't trusted
+                            // (>= threshold); a non-finite model value is treated the same.
+                            let m = result[t + ch]
+                            var v = copy[t + ch] < modelThreshold && m.isFinite ? m : copy[t + ch]
                             v = v / 0.04 * mad3[ch] + med3[ch]
                             output.d[dst + ch] = v
                         }
@@ -191,7 +237,8 @@ public final class Denoiser {
             }
         }
 
-        // Blend by strength (keep-bright threshold is enormous -> effectively denoised).
+        // Blend by strength; pixels at/above the model threshold keep the original
+        // (with the 3.x threshold of 10 that is ~250 MADs -> effectively all denoised).
         var out = [Float](repeating: 0, count: H * W * c)
         for ch in 0..<c {
             let thr = modelThreshold / 0.04 * mad[ch] + median[ch]

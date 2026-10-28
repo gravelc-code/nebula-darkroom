@@ -82,6 +82,29 @@ public struct FITSImage: Sendable {
 
     public enum FITSError: Error { case badHeader(String), truncated }
 
+    /// The largest axis `read` accepts. Header values are untrusted input: a
+    /// negative or huge NAXISn used to trap on the size arithmetic, and 0
+    /// passed the reader and crashed later in the engine. 65 536 is far beyond
+    /// any Seestar frame or mosaic (an S50 sub is 1080×1920).
+    public static let maxAxis = 65_536
+
+    /// Validate the image geometry from a header and return the pixel count
+    /// per plane and the byte count of the data unit, without any arithmetic
+    /// that can trap.
+    static func validatedGeometry(naxis: Int, width w: Int, height h: Int,
+                                  channels ch: Int) throws -> (plane: Int, bytes: Int) {
+        guard naxis == 2 || naxis == 3 else { throw FITSError.badHeader("NAXIS=\(naxis) unsupported") }
+        guard (1...maxAxis).contains(w), (1...maxAxis).contains(h) else {
+            throw FITSError.badHeader("image size \(w)×\(h) out of range")
+        }
+        guard ch == 1 || ch == 3 else { throw FITSError.badHeader("NAXIS3=\(ch) unsupported") }
+        let (plane, o1) = w.multipliedReportingOverflow(by: h)
+        let (count, o2) = plane.multipliedReportingOverflow(by: ch)
+        let (bytes, o3) = count.multipliedReportingOverflow(by: 4)
+        guard !(o1 || o2 || o3) else { throw FITSError.badHeader("image size overflows") }
+        return (plane, bytes)
+    }
+
     public static func read(_ url: URL) throws -> FITSImage {
         let data = try Data(contentsOf: url)
 
@@ -117,10 +140,11 @@ public struct FITSImage: Sendable {
         let w = try intCard("NAXIS1")
         let h = try intCard("NAXIS2")
         let ch = naxis == 3 ? try intCard("NAXIS3") : 1
-        guard ch == 1 || ch == 3 else { throw FITSError.badHeader("NAXIS3=\(ch) unsupported") }
+        let (plane, bytes) = try validatedGeometry(naxis: naxis, width: w, height: h, channels: ch)
+        let count = plane * ch   // cannot overflow: validated above
 
-        let count = w * h * ch
-        guard offset + count * 4 <= data.count else { throw FITSError.truncated }
+        let (end, o) = offset.addingReportingOverflow(bytes)
+        guard !o, end <= data.count else { throw FITSError.truncated }
 
         // Big-endian float32, plane-separated (all of R, then G, then B).
         var planes = [Float](repeating: 0, count: count)
@@ -133,8 +157,7 @@ public struct FITSImage: Sendable {
         }
 
         // Repack plane-separated -> interleaved RGBA.
-        var rgba = [Float](repeating: 1, count: w * h * 4)
-        let plane = w * h
+        var rgba = [Float](repeating: 1, count: plane * 4)
         for y in 0..<h {
             for x in 0..<w {
                 let p = y * w + x
@@ -190,7 +213,10 @@ public struct FITSImage: Sendable {
         let rem = data.count % 2880
         if rem != 0 { data.append(Data(count: 2880 - rem)) }
 
-        try data.write(to: url)
+        // Atomic: written to a temporary file and renamed into place, so a
+        // crash or full disk mid-write can never leave a truncated layer
+        // behind under the real name.
+        try data.write(to: url, options: .atomic)
     }
 
     /// Rewrite a FITS file's pixel data while byte-preserving its ENTIRE
@@ -234,6 +260,6 @@ public struct FITSImage: Sendable {
         floats.withUnsafeBytes { out.append(contentsOf: $0) }
         let rem = out.count % 2880
         if rem != 0 { out.append(Data(count: 2880 - rem)) }
-        try out.write(to: url)
+        try out.write(to: url, options: .atomic)   // never a half-written file
     }
 }

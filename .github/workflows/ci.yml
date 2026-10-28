@@ -23,6 +23,9 @@ jobs:
           path: /tmp/nebula-ci
           key: spm-${{ runner.os }}-${{ hashFiles('Package.resolved') }}
 
+      - name: Check packaging scripts parse
+        run: for f in scripts/*.sh; do bash -n "$f"; done
+
       - name: Build
         run: bash scripts/swift-xcode.sh build --scratch-path /tmp/nebula-ci
 

@@ -6,7 +6,7 @@ import NebulaEngine
 
 final class NebulaBakeTests: XCTestCase {
     func testStarNetStretchRoundTripsAndPNGBridgeIsLossless() throws {
-        // The StarNet hook stretches linear→display, hands StarNet a 16-bit PNG,
+        // The StarNet hook stretches linear→display, hands StarNet a 16-bit TIFF,
         // then inverts the stretch. Both halves must round-trip: otherwise the
         // starless comes back wrong and stars = master - starless is garbage.
         let shadow: Float = 0.002, midtone: Float = 0.08
@@ -18,18 +18,18 @@ final class NebulaBakeTests: XCTestCase {
             if x > shadow { XCTAssertEqual(back, x, accuracy: 2e-3, "stretch not invertible at \(x)") }
         }
 
-        // 16-bit PNG write→read preserves pixels (top-row-first, no flip).
+        // 16-bit TIFF write→read preserves pixels (top-row-first, no flip).
         let w = 5, h = 3
         var rgb = [Float](repeating: 0, count: w*h*3)
         for i in 0..<(w*h*3) { rgb[i] = Float((i * 37) % 100) / 99 }
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("nebula_png16_\(UUID().uuidString).png")
+            .appendingPathComponent("nebula_tiff16_\(UUID().uuidString).tiff")
         defer { try? FileManager.default.removeItem(at: url) }
-        try Baker.writePNG16(rgb, w: w, h: h, to: url)
-        let back = try Baker.readPNG16(url, w: w, h: h)
+        try Baker.writeTIFF16(rgb, w: w, h: h, to: url)
+        let back = try Baker.readTIFF16(url, w: w, h: h)
         XCTAssertEqual(back.count, rgb.count)
         for i in 0..<rgb.count { XCTAssertEqual(back[i], rgb[i], accuracy: 1.0/65535 + 1e-4,
-                                                "PNG bridge changed pixel \(i)") }
+                                                "TIFF bridge changed pixel \(i)") }
     }
 
     /// The Seestar's "LP" filter is dual-narrowband (Ha + OIII) despite its
@@ -336,12 +336,6 @@ final class NebulaBakeTests: XCTestCase {
                              "perfect star removal must not read as subject loss")
     }
 
-    func testMissingCorrectionModelsPreserveMasterExactly() {
-        let src=(0..<(20*15*3)).map { Float($0) / Float(20*15*3) }
-        XCTAssertEqual(Baker.fallbackBackground(src, h: 15, w: 20, c: 3), src)
-        XCTAssertEqual(Baker.fallbackDenoise(src, h: 15, w: 20, c: 3), src)
-    }
-
     func testLightSelectionRejectsDifferentFilterAndKeepsMixedExposure() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -378,6 +372,5 @@ final class NebulaBakeTests: XCTestCase {
         XCTAssertEqual(selected.skippedIncompatible, 2)
         XCTAssertEqual(selected.integrationSeconds, 40)
         XCTAssertEqual(selected.exposures, [10, 30])
-        XCTAssertFalse(selected.supportsTwoXDrizzle)
     }
 }

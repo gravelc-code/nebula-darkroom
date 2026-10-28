@@ -31,7 +31,14 @@ public final class OrtModel {
     }
 
     /// Run one float tensor (row-major, `shape`) and return the first output flat.
-    public func run(_ input: [Float], shape: [Int]) throws -> [Float] {
+    ///
+    /// The output is vetted before anyone indexes it: it must be a float32
+    /// tensor whose byte length matches its shape, and — when the caller knows
+    /// what the model should produce — exactly `expectedCount` values. A model
+    /// that answers in fp16/uint8 or a different shape (a newer GraXpert release,
+    /// a wrong file) then becomes a descriptive, catchable error instead of an
+    /// out-of-range trap in the caller's loops.
+    public func run(_ input: [Float], shape: [Int], expectedCount: Int? = nil) throws -> [Float] {
         let data = input.withUnsafeBufferPointer {
             NSMutableData(bytes: $0.baseAddress, length: $0.count * MemoryLayout<Float>.stride)
         }
@@ -40,11 +47,47 @@ public final class OrtModel {
         let outputs = try session.run(withInputs: [inputName: tensor],
                                       outputNames: [outputName], runOptions: nil)
         guard let out = outputs[outputName] else {
-            throw NSError(domain: "NebulaAI", code: 1,
-                          userInfo: [NSLocalizedDescriptionKey: "missing output \(outputName)"])
+            throw AIError.unexpectedOutput("missing output '\(outputName)'")
+        }
+        let info: ORTTensorTypeAndShapeInfo
+        do { info = try out.tensorTypeAndShapeInfo() } catch {
+            // The ObjC binding only maps float/int/uint/string; fp16 & co. throw here.
+            throw AIError.unexpectedOutput(
+                "output '\(outputName)' has an element type Nebula can't read (expected float32): "
+                + error.localizedDescription)
+        }
+        guard info.elementType == .float else {
+            throw AIError.unexpectedOutput(
+                "output '\(outputName)' is \(Self.name(of: info.elementType)), expected float32")
+        }
+        let dims = info.shape.map(\.intValue)
+        let count = dims.reduce(1, *)
+        if let expectedCount, count != expectedCount {
+            throw AIError.unexpectedOutput(
+                "output '\(outputName)' has shape \(dims) (\(count) values), expected \(expectedCount) "
+                + "for input shape \(shape)")
         }
         let outData = try out.tensorData() as Data
+        guard outData.count == count * MemoryLayout<Float>.stride else {
+            throw AIError.unexpectedOutput(
+                "output '\(outputName)' holds \(outData.count) bytes for shape \(dims)")
+        }
         return outData.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+    }
+
+    private static func name(of type: ORTTensorElementDataType) -> String {
+        switch type {
+        case .float: return "float32"
+        case .int8: return "int8"
+        case .uInt8: return "uint8"
+        case .int32: return "int32"
+        case .uInt32: return "uint32"
+        case .int64: return "int64"
+        case .uInt64: return "uint64"
+        case .string: return "string"
+        case .undefined: return "undefined"
+        @unknown default: return "element type \(type.rawValue)"
+        }
     }
 }
 

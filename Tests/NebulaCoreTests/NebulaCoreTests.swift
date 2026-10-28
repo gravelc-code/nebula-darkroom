@@ -139,7 +139,8 @@ final class EngineParamsTests: XCTestCase {
         XCTAssertEqual(p.vibrance, 1, accuracy: 1e-6)
         XCTAssertEqual(p.tint, 0.5, accuracy: 1e-6)
         XCTAssertEqual(p.warmth, 0.5, accuracy: 1e-6)
-        XCTAssertEqual(p.shadowNeutralize, 0.25, accuracy: 1e-6)  // background=0 baseline
+        XCTAssertEqual(p.shadowNeutralize, 0, accuracy: 1e-6)     // finishing stages off…
+        XCTAssertEqual(p.finishing, 0, accuracy: 1e-6)            // …at the truthful baseline
         XCTAssertEqual(p.starWeight, 1, accuracy: 1e-6)
         XCTAssertEqual(p.starD, 0, accuracy: 1e-6)
         XCTAssertEqual(p.starShrink, 0, accuracy: 1e-6)

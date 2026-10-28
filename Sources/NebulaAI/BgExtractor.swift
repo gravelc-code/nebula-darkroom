@@ -16,9 +16,20 @@ public final class BgExtractor {
         model = try OrtModel(modelPath: modelPath, useCoreML: useCoreML)
     }
 
-    /// `pixels` is row-major HxWxC in [0,1]; returns the background-subtracted image.
+    public convenience init(model: LocatedModel) throws {
+        try self.init(modelPath: model.path)
+    }
+
+    /// `pixels` is row-major HxWxC (C = 1 or 3) in [0,1]; returns the
+    /// background-subtracted image, always finite. Throws (never traps) on a bad
+    /// shape or an unusable model output. `smoothing` is GraXpert's 0…1 option
+    /// (the bake and `nebula-ai bg` use its default, 0.5).
     public func extract(pixels: [Float], h: Int, w: Int, c: Int,
                         smoothing: Float = 0) throws -> [Float] {
+        try AIInput.validate(count: pixels.count, h: h, w: w, c: c)
+        guard smoothing.isFinite else { throw AIError.invalidImage("smoothing \(smoothing)") }
+        // NaN/Inf -> channel median; identity (same storage) for a finite image.
+        let pixels = AIInput.replacingNonFinite(pixels, h: h, w: w, c: c).pixels
         let padding = 8
         let inner = 256 - 2 * padding                       // 240
 
@@ -34,7 +45,7 @@ public final class BgExtractor {
             var vals = [Float](repeating: 0, count: ss * ss)
             for i in 0..<(ss * ss) { vals[i] = shrink[i * c + ch] }
             let m = medianOf(vals); median[ch] = m
-            mad[ch] = medianOf(vals.map { abs($0 - m) })
+            mad[ch] = AIInput.flooredMAD(medianOf(vals.map { abs($0 - m) }))
         }
 
         // Normalize, clip [-1,1], broadcast mono -> 3ch for the model.
@@ -47,7 +58,12 @@ public final class BgExtractor {
             }
         }
 
-        let result = try model.run(tile, shape: [1, ss, ss, 3])   // 256x256x3
+        let result = try model.run(tile, shape: [1, ss, ss, 3], expectedCount: ss * ss * 3)
+        // One non-finite value here would spread through the blur/upscale and the
+        // mean into every output pixel — refuse it so the bake keeps its input.
+        guard AIInput.allFinite(result) else {
+            throw AIError.unexpectedOutput("background model returned non-finite values")
+        }
 
         // Denormalize to a c-channel background.
         var bg = [Float](repeating: 0, count: ss * ss * c)
@@ -67,11 +83,16 @@ public final class BgExtractor {
         bg = gaussianBlur(bg, h: inner, w: inner, c: c, kernel: gaussianKernel(sigma: 3.0))
         bg = resizeBilinear(bg, sh: inner, sw: inner, c: c, dh: h, dw: w)
 
-        // Subtraction correction: img - bg + mean(bg), clip.
-        var mean: Float = 0
-        for v in bg { mean += v }
-        mean /= Float(bg.count)
-        var out = [Float](repeating: 0, count: h * w * c)
+        return Self.subtract(background: bg, from: pixels)
+    }
+
+    /// GraXpert's "Subtraction" correction (`background_extraction.py:161-173`):
+    /// `img - bg + mean(bg)`, clipped to [0,1]. The mean is accumulated in
+    /// Double (see `AIInput.mean`); the old running Float32 sum drifted by +1.2%
+    /// at 1920x1080x3 and -6.7% at 4K (audit 2026-10-27 #42).
+    static func subtract(background bg: [Float], from pixels: [Float]) -> [Float] {
+        let mean = AIInput.mean(bg)
+        var out = [Float](repeating: 0, count: pixels.count)
         for i in 0..<out.count { out[i] = min(max(pixels[i] - bg[i] + mean, 0), 1) }
         return out
     }

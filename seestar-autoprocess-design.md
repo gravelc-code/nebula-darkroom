@@ -2,7 +2,7 @@
 
 A macOS app that turns a folder of Seestar sub-frames into a finished, gorgeous deep-sky image with **one tap**, then lets anyone refine it with a handful of plain-language sliders that respond instantly. It looks like a photo app, not a telescope tool.
 
-**Platform:** macOS 14+, Apple Silicon · **Interactive core:** native Metal · **AI steps:** native CoreML · **Classical DSP:** Siril, bundled & headless (invisible) · **UI:** SwiftUI · **Licence:** GPL-3.0, free & open source · **Install:** one signed DMG, drag to Applications, zero external dependencies.
+**Platform:** macOS 26+, Apple Silicon · **Interactive core:** native Metal · **AI steps:** in-process onnxruntime (CPU execution provider) · **Classical DSP:** Siril, bundled & headless (invisible) · **UI:** SwiftUI · **Licence:** GPL-3.0, free & open source · **Install:** one signed DMG, drag to Applications, zero external dependencies.
 
 ---
 
@@ -20,7 +20,7 @@ Three tiers. The rule: **own the surface and the real-time layer; wrap the matur
 | Layer | Implementation | Why |
 |-------|----------------|-----|
 | **Interactive image ops** (all sliders) | **Native Metal** — textures on GPU, one shader per op | This is where "amazing + responsive" is won. No dependency belongs here. |
-| **AI steps** (gradient removal, denoise, star separation) | **Native CoreML** running ONNX model weights in-process | Deletes `GraXpert.app`/`StarNet` as apps; keeps only the proven models. |
+| **AI steps** (gradient removal, denoise) | **onnxruntime in-process** (CPU EP) running GraXpert's ONNX models, read from the user's GraXpert install | Deletes `GraXpert.app` as a runtime dependency; keeps only the proven models. Star separation uses a user-installed StarNet if present, else a classical star mask. |
 | **Classical DSP** (register, stack, reject, plate-solve, colour-calibrate) | **Siril, bundled + headless**, version-pinned inside the app | Rewriting astrometry-grade solving is where robustness goes to die. Wrapping it *is* the robust choice. |
 
 **Reimplementing the classical DSP would make the app *less* robust, not more.** Plate-solving needs star catalogues and blind-solve search; spectrophotometric colour calibration needs catalogue photometry. These are solved problems in Siril. Wrapping a pinned, invisible binary is lower-risk than owning that code.
@@ -44,11 +44,11 @@ Three tiers. The rule: **own the surface and the real-time layer; wrap the matur
         ▼
 ┌──────────────────────────────────────────────────────────┐
 │ STAGE A — BAKE  (headless, invisible, ~minutes, one time) │
-│  Siril (bundled)         CoreML (in-process)              │
+│  Siril (bundled)         onnxruntime (in-process)         │
 │  register → stack →      background removal → denoise →    │
 │  plate-solve → colour    star separation                  │
-│        └──────────────► emits 4 float layers (GPU-ready): │
-│           master · denoised · starless · stars            │
+│        └──────────────► emits 5 float layers (GPU-ready): │
+│   master · corrected · denoised · starless · stars        │
 └───────────────────────────────┬──────────────────────────┘
                                  │  layers uploaded to MTLTextures, resident
                                  ▼
@@ -58,11 +58,11 @@ Three tiers. The rule: **own the surface and the real-time layer; wrap the matur
 │  state → hero preview.  Same shaders, tiled, for export.  │
 └───────────────────────────────┬──────────────────────────┘
                                  ▼
-                 SwiftUI: hero image + 3 sliders (+ Advanced)
+                 SwiftUI: hero image + 6 sliders (+ Refine)
                  menubar watch: subs land → baked → notify
 ```
 
-Stage A runs the science once and hands Stage B four floating-point layers. Stage B never calls Siril or CoreML again while you drag sliders — it's pure GPU. That's the entire reason it can be both faithful and instant.
+Stage A runs the science once and hands Stage B five floating-point layers. Stage B never calls Siril or the AI again while you drag sliders — it's pure GPU. That's the entire reason it can be both faithful and instant.
 
 ---
 
@@ -78,7 +78,7 @@ Stage A runs the science once and hands Stage B four floating-point layers. Stag
 
 ## 4. Stage A — the bake (invisible)
 
-Linear-domain; output is **not** stretched. Emits four 32-bit float layers.
+Linear-domain; output is **not** stretched. Emits five 32-bit float layers.
 
 | # | Step | Engine | Note |
 |---|------|--------|------|
@@ -87,10 +87,10 @@ Linear-domain; output is **not** stretched. Emits four 32-bit float layers.
 | 3 | Stack | Siril | `stack r_light rej w 3 3` — Winsorized clipping kills planes/satellites/hot pixels |
 | 4 | Plate-solve | Siril | seeded from header RA/Dec; blind-solve fallback |
 | 5 | Colour-calibrate | Siril | `spcc` → fallback `pcc` → fallback native white-balance |
-| 6 | Background removal | **CoreML** | GraXpert bg model in-process; no sample points needed |
-| 7 | Denoise | **CoreML** | kept as a **separate layer**, never baked in destructively |
-| 8 | Star separation | **CoreML** | StarNet model → `starless` + `stars` |
-| 9 | Emit layers | Swift | 4 float FITS/EXR + `manifest.json`, uploaded to Metal textures |
+| 6 | Background removal | **onnxruntime** | GraXpert bg model in-process; no sample points needed → `corrected` |
+| 7 | Denoise | **onnxruntime** | kept as a **separate layer**, never baked in destructively |
+| 8 | Star separation | StarNet (user-installed) / Swift | → `starless` + `stars`; classical star mask when StarNet is absent |
+| 9 | Emit layers | Swift | 5 float FITS + `manifest.json`, uploaded to Metal textures |
 
 **Pivotal choices:** cull folds into Siril's frame selection (no experimental Python API in the critical path); denoise is preserved as its own layer so strength becomes a *slider*, not a bake-time commitment; star separation is what lets nebulosity stretch hard without bloating stars.
 
@@ -100,7 +100,7 @@ Linear-domain; output is **not** stretched. Emits four 32-bit float layers.
 
 ## 5. Stage B — the native Metal engine (responsiveness core)
 
-**Residency:** on bake completion, the four layers upload to `MTLTexture`s (RGBA16F) and *stay* on the GPU. A downsampled preview texture and the full-res texture both live there.
+**Residency:** on bake completion, the five layers upload to `MTLTexture`s (RGBA16F) and *stay* on the GPU. A downsampled preview texture and the full-res texture both live there.
 
 **Render loop:** a `CVDisplayLink`/`MTKView` loop renders the latest slider state every vsync (120 Hz on ProMotion). Slider input only mutates a small uniforms struct; it never enqueues work or backs up a queue — the loop always draws *current* params, so dragging feels weightless with zero lag or stale frames.
 
@@ -111,7 +111,7 @@ lerp(master, denoised, denoise)      // denoise as a blend, not a switch
 → blackPoint(background)
 → ghs(glow, contrast)                // generalised hyperbolic stretch, in a shader
 → localContrast(detail)              // unsharp on starless only
-→ saturateMidtones(colour)           // luminance-weighted; background stays neutral
+→ colour(saturation, vibrance, tint, warmth)  // background stays neutral
 ─ stars: ghs(starStretch) · scaled by starWeight
 → screen(starless, stars)            // 1-(1-a)(1-b): adds stars without clipping cores
 ```
@@ -119,7 +119,7 @@ lerp(master, denoised, denoise)      // denoise as a blend, not a switch
 - **GHS in-shader:** implement the published closed-form generalised hyperbolic stretch as a Metal function so the look is identical in preview and export.
 - **Export:** the *same* shaders run on the full-res texture, **tiled** to stay within memory; no separate "render path" to drift out of sync. Preview truly equals export.
 - **Before/after:** free — just draw the master vs the chained result split by a draggable divider, both already on the GPU.
-- **Precision:** RGBA16F throughout; dither on final 16-bit export to avoid banding.
+- **Precision:** RGBA32F through the chain to a 16-bit PNG export, which needs no dither. The 8-bit live preview gets TPDF dither in the display blit only, so it shows no banding the export doesn't have.
 
 This is why "all-Metal" is the right call *here specifically*: the interactive layer has no legitimate dependency, and owning it end-to-end is what delivers the feel.
 
@@ -130,11 +130,11 @@ This is why "all-Metal" is the right call *here specifically*: the interactive l
 **Principle: one hero image, one tap to great, depth only if wanted.**
 
 - **Import → instant Auto.** Drop (or auto-ingest) a target; the bake runs with a progress shimmer *over a live-updating preview*, and lands on a finished, profile-tuned image. Zero decisions required. For most people, this is the whole app.
-- **Three headline sliders, plain language:** **Glow** (faint-detail brightness), **Colour** (saturation), **Stars** (presence/size). That's the front screen.
-- **"Advanced" reveals five more:** Contrast, Background, Detail, Star Size, Denoise. Same instant response; hidden by default.
-- **No jargon, anywhere.** Never "GHS D," "SPCC," "sigma clipping," "starless." The words the user sees are Glow, Colour, Stars, Detail, Background.
+- **Six headline sliders, plain language:** **Glow** (faint-detail brightness), **Saturation**, **Vibrance**, **Tint**, **Warmth** (colour), **Stars** (presence). That's the front screen.
+- **"Refine" reveals five more:** Contrast, Background, Detail, Star Size, Denoise. Same instant response.
+- **No jargon, anywhere.** Never "GHS D," "SPCC," "sigma clipping," "starless." The user only sees the eleven slider names.
 - **Image-first aesthetic:** full-bleed image on near-black, chrome recedes, controls float and auto-hide. The photo is the interface.
-- **Presets as looks:** "Natural," "Vivid," "Deep" — each is just a slider state. One tap, instantly previewed.
+- **No presets** (dropped after the slider redesign): every target opens on one developed look (`LookState.default`), Reset returns to it, and the before/after wipe shows the truthful `LookState.neutral`.
 - **Watch mode (menubar):** point it at the Seestar folder once; thereafter targets bake automatically and notify with a thumbnail. Tap → opens on the finished image, sliders ready.
 - **Never a dead end:** any engine failure falls back silently to a good result. The user sees a beautiful image or a gentle "still gathering light," never an error dialog or a broken state.
 
@@ -144,7 +144,7 @@ This is why "all-Metal" is the right call *here specifically*: the interactive l
 |------------|----------|---------|
 | Glow | GHS D (log-domain, `expm1`) | starless |
 | Contrast | GHS SP (symmetry point) | starless |
-| Background | correction blend + black point (sets `skyFloor`) | starless |
+| Background | correction blend + black point (sets `skyFloor`); below 60 also fades out the finishing steps (SCNR floor, core whitening, shadow neutralisation) toward the truthful master | starless |
 | Saturation | uniform chroma scale | starless |
 | Vibrance | chroma-protected boost | starless |
 | Tint | SCNR green balance | starless |
@@ -172,13 +172,13 @@ tone shaping.
 
 ## 7. Profiles = bake settings + a starting look
 
-Auto-selected from filter + object type; user-overridable in one tap. Sets bake parameters and the initial 8-float slider state (see §6). Ship: **Galaxy**, **Broadband Nebula**, **Narrowband/Duo-band**, **Star Cluster**.
+Auto-selected from filter + object type; user-overridable in one tap. Sets bake parameters and the initial 11-float slider state (see §6). Ship: **Galaxy**, **Broadband Nebula**, **Narrowband/Duo-band**, **Star Cluster**.
 
 ---
 
 ## 8. Build phases
 
-Order de-risks the two hard, novel parts (the Metal engine and the robust bake seam) before UI polish.
+Order de-risks the two hard, novel parts (the Metal engine and the robust bake seam) before UI polish. *This is the original plan; what shipped (onnxruntime rather than CoreML, 11 sliders, no presets, five layers) is logged in `HANDOFF.md`.*
 
 | Phase | Deliverable | Acceptance |
 |-------|-------------|-----------|
@@ -193,15 +193,15 @@ Order de-risks the two hard, novel parts (the Metal engine and the robust bake s
 
 ## 8a. Licence & distribution (free, open source, 1-click)
 
-**The app is GPL-3.0.** Going FOSS *resolves* the earlier licensing gate rather than fighting it: Siril (GPLv3) and the GraXpert/StarNet models (copyleft) can be bundled and their weights embedded, because the whole app inherits a compatible copyleft licence. Attribution + source availability, not permission, are the obligations — met by shipping on a public repo with a NOTICES file.
+**The app is GPL-3.0.** Going FOSS *resolves* the earlier licensing gate for Siril: it (GPLv3) and its GPL/LGPL/permissive Homebrew libraries can be bundled because the whole app inherits a compatible copyleft licence. The obligations are attribution + licence texts (shipped in the app and DMG) and the Corresponding Source (attached to every release by `scripts/fetch-sources.sh`; see NOTICES.md). **GraXpert's model weights and StarNet are never bundled or downloaded:** the weights' redistribution terms are unstated (GraXpert fetches them with private credentials) and StarNet is proprietary — the app reads a user's own GraXpert install and uses StarNet only if the user installed it.
 
 **Ship with zero external dependencies.** The user installs *one* thing.
 
-- **No Python in the shipping build.** Swift orchestrates the bundled Siril binary directly and runs the AI models through CoreML. Python stays purely a dev/prototyping convenience (Phase 0), never something the user touches. This is the single biggest robustness and simplicity win — no conda, no pip, no version drift on the user's machine.
-- **Everything lives inside the `.app` bundle:** the pinned Siril binary + its dylibs (`Contents/Frameworks`), the CoreML models (`Contents/Resources/Models`), and the plate-solving star index needed for the field scale. One folder, self-contained, relocatable.
+- **No Python in the shipping build.** Swift orchestrates the bundled Siril binary directly and runs the AI models through onnxruntime, in-process. Python stays purely a dev/prototyping convenience (Phase 0), never something the user touches. This is the single biggest robustness and simplicity win — no conda, no pip, no version drift on the user's machine.
+- **Everything lives inside the `.app` bundle:** the pinned Siril binary + its dylibs (`Contents/Resources/siril`, `…/siril/libs`), the Real-ESRGAN enlargement model (`Contents/Resources/Models`), and every licence text (`Contents/Resources/Licenses`). No plate-solving star index is bundled: catalogue colour calibration is attempted and falls back to native white balance. One folder, self-contained, relocatable.
 - **Distribution = a single signed, notarised DMG** on GitHub Releases. The user drags the icon to Applications and opens it. That's the whole install. A Homebrew Cask (`brew install --cask nebula`) is a one-line alternative for terminal users, pointing at the same DMG.
 - **First launch:** a friendly one-screen check verifies the bundled engine runs (5-sub smoke test) and, *only if* you chose not to bundle the larger star catalogues, downloads them once with a progress screen. Prefer bundling so the app works fully offline on first run — a bigger download beats a fragile first-run network step.
-- **Notarisation reality:** Gatekeeper requires an Apple Developer ID ($99/yr) to notarise, so the app opens with a normal double-click instead of a right-click-to-bypass dance. For a free app this small cost buys the "trivially simple" open experience; without it, users hit a scary warning. Budget for it.
+- **Notarisation reality:** Gatekeeper requires an Apple Developer ID ($99/yr) to notarise, so the app opens with a normal double-click instead of a System Settings → Privacy & Security → "Open Anyway" dance (right-click → Open no longer bypasses Gatekeeper on macOS 15+). Status: builds are Developer ID signed; notarisation is the remaining step (`scripts/notarize.sh`). For a free app this small cost buys the "trivially simple" open experience; without it, users hit a scary warning. Budget for it.
 - **Updates:** Sparkle (the standard open-source macOS updater) for silent in-app updates, feed hosted on GitHub Releases.
 
 **Net user experience:** download one file → drag to Applications → open → point it at the Seestar folder once → finished images appear. No terminal, no Python, no GraXpert, no Siril install, ever.
@@ -210,10 +210,10 @@ Order de-risks the two hard, novel parts (the Metal engine and the robust bake s
 
 ## 9. Risks & mitigations
 
-- **Bundle size.** Siril + dylibs + CoreML models + star index makes a chunky DMG (hundreds of MB). Acceptable for the zero-dependency payoff; trim the star index to the Seestar's fixed focal length, and lazy-download only truly optional data.
+- **Bundle size.** Siril + dylibs + the enlargement model make a ~130 MB DMG (the GraXpert models, ~700 MB, are not bundled). Acceptable for the zero-dependency payoff; trim the star index to the Seestar's fixed focal length, and lazy-download only truly optional data.
 - **Keeping the bundled Siril working across macOS releases** → pin and test one version per app release; the smoke test on launch catches breakage before the user does.
 - **Scope creep into reimplementing DSP** → hold the line: native = interactive + AI models only; classical DSP stays wrapped. Revisit only with measured cause.
-- **CoreML model conversion effort** (ONNX→CoreML, or onnxruntime CoreML EP) → spike it in Phase 2 on one model before committing; keep a subprocess fallback until proven.
+- **CoreML model conversion effort** (ONNX→CoreML, or onnxruntime CoreML EP) → *resolved in Phase 2:* coremltools can't ingest these ONNX models and the CoreML EP fails/slows on them, so onnxruntime's CPU EP runs them (bit-exact with GraXpert).
 - **Overcooked look** → star separation + starless-only denoise/detail make it structurally hard; conservative defaults; Denoise/Detail dial *down*.
 - **Plate-solve/SPCC fragility** → native colour fallback (§4) means colour never blocks a result.
 - **Full-res export memory** → tiled shader passes; stream, don't hold everything.

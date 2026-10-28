@@ -24,7 +24,7 @@ if args.count >= 2, args[1] == "bg" {
     do {
         let data = try Data(contentsOf: URL(fileURLWithPath: inRaw))
         let pixels = data.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
-        precondition(pixels.count == H * W * C, "\(pixels.count) floats, expected \(H*W*C)")
+        guard pixels.count == H * W * C else { fail("\(pixels.count) floats, expected \(H*W*C)") }
         let bg = try BgExtractor(modelPath: model)
         let out = try bg.extract(pixels: pixels, h: H, w: W, c: C, smoothing: 0)
         let outData = out.withUnsafeBufferPointer { Data(buffer: $0) }
@@ -47,7 +47,7 @@ if args.count >= 2, args[1] == "denoise" {
     do {
         let data = try Data(contentsOf: URL(fileURLWithPath: inRaw))
         let pixels = data.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
-        precondition(pixels.count == H * W * C, "\(pixels.count) floats, expected \(H*W*C)")
+        guard pixels.count == H * W * C else { fail("\(pixels.count) floats, expected \(H*W*C)") }
         let dn = try Denoiser(modelPath: model)
         let out = try dn.denoise(pixels: pixels, h: H, w: W, c: C, strength: strength)
         let outData = out.withUnsafeBufferPointer { Data(buffer: $0) }
@@ -66,7 +66,9 @@ if args.count >= 2, args[1] == "run" {
         let data = try Data(contentsOf: URL(fileURLWithPath: inRaw))
         let input = data.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
         let shape = [1, 256, 256, 3]
-        precondition(input.count == shape.reduce(1, *), "input has \(input.count) floats, expected \(shape.reduce(1, *))")
+        guard input.count == shape.reduce(1, *) else {
+            fail("input has \(input.count) floats, expected \(shape.reduce(1, *))")
+        }
         let output = try OrtRuntime.run(modelPath: model, inputName: inName,
                                         outputName: outName, input: input, shape: shape)
         let outData = output.withUnsafeBufferPointer { Data(buffer: $0) }
